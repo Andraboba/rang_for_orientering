@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}{{ protocol_cleaned_title }} — Протоколы{% endblock %}
+
+{% block content %}
+    <div class="card">
+        <h2>{{ protocol_cleaned_title }}</h2>
+        <p class="meta">
+            Загружен: {{ protocol.created_at|date:"d.m.Y H:i" }}
+            {% if protocol.event_date %}
+                · Дата соревнований: {{ protocol.event_date|date:"d.m.Y" }}
+            {% endif %}
+            {% if protocol.source_url %}
+                · <a href="{{ protocol.source_url }}" target="_blank" rel="noopener" style="color: var(--accent);">Исходная ссылка</a>
+            {% endif %}
+        </p>
+
+        <div class="card" style="margin-bottom: 1rem; border-left: 4px solid var(--muted);">
+            <h3 style="margin-top: 0; font-size: 1rem;">Название протокола</h3>
+            <p class="meta">Отображаемое название очищается от служебных фраз. Вы можете изменить его для экспорта и списков.</p>
+            <form method="post" action="{% url 'protocols:set_protocol_title' protocol.pk %}">
+                {% csrf_token %}
+                {{ title_form.protocol_id }}
+                <div class="form-group">
+                    <label for="id_title">{{ title_form.title.label }}</label>
+                    {{ title_form.title }}
+                    {% if title_form.title.errors %}<span class="error">{{ title_form.title.errors.0 }}</span>{% endif %}
+                </div>
+                <button type="submit" class="btn btn-secondary">Сохранить название</button>
+            </form>
+        </div>
+
+        {% if show_date_form and date_form %}
+        <div class="card" style="margin-bottom: 1rem; border-left: 4px solid var(--accent);">
+            <h3 style="margin-top: 0; font-size: 1rem;">Дата соревнований (WinOrient)</h3>
+            <p class="meta">Укажите дату соревнований — она нужна для экспорта за период. Если в названии протокола есть дата, она подставлена ниже.</p>
+            <form method="post" action="{% url 'protocols:set_protocol_event_date' protocol.pk %}">
+                {% csrf_token %}
+                {{ date_form.protocol_id }}
+                <div class="form-group">
+                    <label for="id_event_date">{{ date_form.event_date.label }}</label>
+                    {{ date_form.event_date }}
+                    {% if date_form.event_date.errors %}<span class="error">{{ date_form.event_date.errors.0 }}</span>{% endif %}
+                </div>
+                <button type="submit" class="btn">Сохранить дату</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <form method="post" action="{% url 'protocols:delete_protocol' protocol.pk %}" style="margin-bottom: 1rem;">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger" onclick="return confirm('Удалить этот протокол и все его результаты?');">
+                Удалить протокол
+            </button>
+        </form>
+
+        <form method="post" action="">
+            {% csrf_token %}
+            {{ form.protocol_id }}
+            <div class="form-group">
+                <label for="id_team_name">{{ form.team_name.label }}</label>
+                {{ form.team_name }}
+                {% if form.team_name.errors %}<span class="error">{{ form.team_name.errors.0 }}</span>{% endif %}
+            </div>
+            <button type="submit" class="btn">Обработать и показать результаты</button>
+        </form>
+        {% if not results and is_orgeo %}
+            <p style="margin-top: 10px;">
+                <a href="?show_all=1" class="btn btn-secondary">Показать всех участников соревнований (Orgeo)</a>
+            </p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Результаты{% if results %} ({{ results|length }}){% endif %}</h2>
+        {% if results %}
+            <p>
+                <a href="{% url 'protocols:export_results' protocol.pk %}" class="btn btn-secondary">Скачать TXT</a>
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Место</th>
+                        <th>Участник</th>
+                        <th>Очки</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in results %}
+                    <tr>
+                        <td>{{ r.place }}{% if r.place_out_of %} из {{ r.place_out_of }}{% endif %}</td>
+                        <td>{{ r.last_name }} {{ r.first_name }}</td>
+                        <td class="points">{{ r.points }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p>Пока нет обработанных результатов для этого протокола.</p>
+        {% endif %}
+    </div>
+{% endblock %}

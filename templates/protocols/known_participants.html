@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Участники в базе — Протоколы{% endblock %}
+
+{% block content %}
+    <div class="card">
+        <h2>Участники в базе</h2>
+        <p class="meta">Список уже учтённых участников (дубли не показываются при обработке). Всего: {{ participants|length }}</p>
+        {% if participants %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Фамилия</th>
+                        <th>Имя</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in participants %}
+                    <tr>
+                        <td>{{ p.last_name }}</td>
+                        <td>{{ p.first_name }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="meta">База пуста. После первой обработки протокола по команде здесь появятся участники.</p>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% load protocols_extras %}
+{% block title %}Главная — Протоколы{% endblock %}
+
+{% block content %}
+    <div class="card">
+        <h2>Загрузить протокол по ссылке</h2>
+        <form method="post" action="{% url 'protocols:home' %}">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="id_url">{{ form.url.label }}</label>
+                {{ form.url }}
+                {% if form.url.errors %}<span class="error">{{ form.url.errors.0 }}</span>{% endif %}
+            </div>
+            <div class="form-group">
+                <label>{{ form.encoding_utf8 }} {{ form.encoding_utf8.label }}</label>
+            </div>
+            <div class="form-group">
+                <label>{{ form.format_sfr }} {{ form.format_sfr.label }}</label>
+            </div>
+            <button type="submit" class="btn">Загрузить</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Протоколы</h2>
+        <form method="get" action="{% url 'protocols:home' %}" style="margin-bottom: 1rem;">
+            <input type="search" name="q" class="form-control" placeholder="Поиск по названию или URL..." value="{{ request.GET.q }}">
+            <button type="submit" class="btn btn-secondary" style="margin-top: 0.5rem;">Искать</button>
+        </form>
+        {% if protocols %}
+            <ul style="list-style: none; padding: 0;">
+                {% for p in protocols %}
+                    <li style="padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+                        <a href="{% url 'protocols:protocol_detail' p.pk %}" style="color: var(--accent); text-decoration: none;">
+                            {{ p.title|clean_protocol_title_filter|default:"Без названия" }}
+                        </a>
+                        <span class="meta"> — {{ p.created_at|date:"d.m.Y H:i" }}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p class="meta">Пока нет загруженных протоколов. Вставьте ссылку на протокол WinOrient выше.</p>
+        {% endif %}
+    </div>
+{% endblock %}

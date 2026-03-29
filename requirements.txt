@@ -1,0 +1,4 @@
+Django>=5.0
+requests
+playwright
+openpyxl>=3.1.0
