@@ -4,7 +4,7 @@ from django.contrib import messages
 from django.db.models import Q
 from django.http import HttpResponse
 from django.views.decorators.http import require_http_methods
-from urllib.parse import urlparse, parse_qs, urlencode, quote
+from urllib.parse import quote
 import re
 
 from .models import Protocol, ProtocolResult, KnownParticipant, SeasonRanking
@@ -21,8 +21,17 @@ from .services.parser import (
     parse_and_process,
 )
 from .services.orgeo_parser import parse_orgeo, fetch_orgeo_document
-from .services.orgeo_browser import fetch_orgeo_with_browser, fetch_orgeo_tables, ORGEO_TABLES_DELIMITER, resolve_orgeo_url
-from .services.season_export import export_season_excel, export_season_excel_by_period, export_season_excel_by_date_range
+from .services.orgeo_browser import (
+    fetch_orgeo_with_browser,
+    fetch_orgeo_tables,
+    ORGEO_TABLES_DELIMITER,
+    resolve_orgeo_url,
+)
+from .services.season_export import (
+    export_season_excel,
+    export_season_excel_by_period,
+    export_season_excel_by_date_range,
+)
 from .services.date_from_title import parse_date_from_title
 from .services.title_cleaner import clean_protocol_title
 
@@ -32,7 +41,9 @@ def home(request):
     q = request.GET.get('q', '').strip()
     protocols = Protocol.objects.all()
     if q:
-        protocols = protocols.filter(Q(title__icontains=q) | Q(source_url__icontains=q))
+        protocols = protocols.filter(
+            Q(title__icontains=q) | Q(source_url__icontains=q)
+        )
     protocols = protocols[:30]
     form = LoadProtocolForm(request.POST or None)
     if request.method == 'POST' and form.is_valid():
@@ -48,10 +59,19 @@ def home(request):
         # (live/#/winter26, live/#/48979, online/48979, finish/...) в /online/{id}
         # и возвращает название и дату соревнования.
         if 'orgeo.ru' in url:
-            app_url, orgeo_title, orgeo_date, resolve_err = resolve_orgeo_url(url)
+            app_url, orgeo_title, orgeo_date, orgeo_days, resolve_err = (
+                resolve_orgeo_url(url)
+            )
             if resolve_err:
                 messages.error(request, f'Orgeo: {resolve_err}')
                 return redirect('protocols:home')
+
+            if not orgeo_date and orgeo_days:
+                for day in orgeo_days:
+                    d = (day or {}).get('date') or ''
+                    if d:
+                        orgeo_date = d
+                        break
 
             # Запомним нормализованный URL для сохранения в БД.
             url = app_url
@@ -63,7 +83,10 @@ def home(request):
                 err = None
             else:
                 if err:
-                    messages.warning(request, f'Orgeo (сеть): {err}. Пробуем загрузку страницы.')
+                    messages.warning(
+                        request,
+                        f'Orgeo (сеть): {err}. Пробуем загрузку страницы.',
+                    )
                 text, err = fetch_orgeo_with_browser(app_url)
                 if err or not text:
                     text, err = fetch_orgeo_document(app_url)
@@ -99,16 +122,26 @@ def home(request):
         if orgeo_date:
             try:
                 from datetime import datetime
-                protocol.event_date = datetime.strptime(orgeo_date, '%Y-%m-%d').date()
+
+                protocol.event_date = datetime.strptime(
+                    orgeo_date, '%Y-%m-%d'
+                ).date()
                 protocol.save(update_fields=['event_date'])
             except (ValueError, TypeError):
                 pass
-        messages.success(request, 'Протокол загружен. Введите название команды для обработки.')
+        messages.success(
+            request,
+            'Протокол загружен. Введите название команды для обработки.',
+        )
         return redirect('protocols:protocol_detail', pk=protocol.pk)
-    return render(request, 'protocols/home.html', {
-        'form': form,
-        'protocols': protocols,
-    })
+    return render(
+        request,
+        'protocols/home.html',
+        {
+            'form': form,
+            'protocols': protocols,
+        },
+    )
 
 
 def protocol_detail(request, pk):
@@ -137,11 +170,17 @@ def protocol_detail(request, pk):
     # Режим "показать всех участников Orgeo" для отладки/проверки.
     show_all = request.GET.get('show_all') == '1'
     if show_all and is_orgeo:
-        chunks = protocol.raw_html.split(ORGEO_TABLES_DELIMITER) if ORGEO_TABLES_DELIMITER in protocol.raw_html else [protocol.raw_html]
+        chunks = (
+            protocol.raw_html.split(ORGEO_TABLES_DELIMITER)
+            if ORGEO_TABLES_DELIMITER in protocol.raw_html
+            else [protocol.raw_html]
+        )
         parsed = []
         for html_chunk in chunks:
             if html_chunk.strip():
-                parsed.extend(parse_orgeo(html_chunk, base_pairs=[], team_name=''))
+                parsed.extend(
+                    parse_orgeo(html_chunk, base_pairs=[], team_name='')
+                )
         protocol.results.all().delete()
         for r in parsed:
             ProtocolResult.objects.create(
@@ -157,7 +196,9 @@ def protocol_detail(request, pk):
         results = protocol.results.all()
 
     if request.method == 'POST':
-        form = ProcessProtocolForm(request.POST, initial={'protocol_id': protocol.pk})
+        form = ProcessProtocolForm(
+            request.POST, initial={'protocol_id': protocol.pk}
+        )
         form.fields['protocol_id'].initial = protocol.pk
         if form.is_valid():
             team_name = (form.cleaned_data.get('team_name') or '').strip()
@@ -169,11 +210,21 @@ def protocol_detail(request, pk):
 
             # Для Orgeo: парсим все таблицы (все группы), фильтр по команде или по базе.
             if protocol.source_url and 'orgeo.ru' in protocol.source_url:
-                chunks = protocol.raw_html.split(ORGEO_TABLES_DELIMITER) if ORGEO_TABLES_DELIMITER in protocol.raw_html else [protocol.raw_html]
+                chunks = (
+                    protocol.raw_html.split(ORGEO_TABLES_DELIMITER)
+                    if ORGEO_TABLES_DELIMITER in protocol.raw_html
+                    else [protocol.raw_html]
+                )
                 parsed = []
                 for html_chunk in chunks:
                     if html_chunk.strip():
-                        parsed.extend(parse_orgeo(html_chunk, base_pairs=base_pairs, team_name=team_name))
+                        parsed.extend(
+                            parse_orgeo(
+                                html_chunk,
+                                base_pairs=base_pairs,
+                                team_name=team_name,
+                            )
+                        )
             else:
                 # Старый режим для WinOrient и аналогов — по названию команды.
                 if not team_name:
@@ -206,28 +257,38 @@ def protocol_detail(request, pk):
                 )
             messages.success(request, f'Найдено результатов: {len(parsed)}.')
             return redirect('protocols:protocol_detail', pk=pk)
-    protocol_cleaned_title = clean_protocol_title(protocol.title or '') or 'Протокол'
-    title_form = EditProtocolTitleForm(initial={
-        'protocol_id': protocol.pk,
-        'title': protocol.title or '',
-    })
-    return render(request, 'protocols/protocol_detail.html', {
-        'protocol': protocol,
-        'protocol_cleaned_title': protocol_cleaned_title,
-        'title_form': title_form,
-        'form': form,
-        'results': results,
-        'is_orgeo': is_orgeo,
-        'date_form': date_form,
-        'show_date_form': show_date_form,
-    })
+    protocol_cleaned_title = (
+        clean_protocol_title(protocol.title or '') or 'Протокол'
+    )
+    title_form = EditProtocolTitleForm(
+        initial={
+            'protocol_id': protocol.pk,
+            'title': protocol.title or '',
+        }
+    )
+    return render(
+        request,
+        'protocols/protocol_detail.html',
+        {
+            'protocol': protocol,
+            'protocol_cleaned_title': protocol_cleaned_title,
+            'title_form': title_form,
+            'form': form,
+            'results': results,
+            'is_orgeo': is_orgeo,
+            'date_form': date_form,
+            'show_date_form': show_date_form,
+        },
+    )
 
 
 @require_http_methods(['POST'])
 def set_protocol_title(request, pk):
     """Сохранить отредактированное пользователем название протокола."""
     protocol = get_object_or_404(Protocol, pk=pk)
-    form = EditProtocolTitleForm(request.POST, initial={'protocol_id': protocol.pk})
+    form = EditProtocolTitleForm(
+        request.POST, initial={'protocol_id': protocol.pk}
+    )
     if form.is_valid():
         new_title = (form.cleaned_data.get('title') or '').strip()
         protocol.title = new_title or None
@@ -243,9 +304,13 @@ def set_protocol_event_date(request, pk):
     """Сохранить дату соревнований для протокола (WinOrient)."""
     protocol = get_object_or_404(Protocol, pk=pk)
     if protocol.source_url and 'orgeo.ru' in protocol.source_url:
-        messages.warning(request, 'Для протоколов Orgeo дата берётся из события.')
+        messages.warning(
+            request, 'Для протоколов Orgeo дата берётся из события.'
+        )
         return redirect('protocols:protocol_detail', pk=pk)
-    form = SetProtocolEventDateForm(request.POST, initial={'protocol_id': protocol.pk})
+    form = SetProtocolEventDateForm(
+        request.POST, initial={'protocol_id': protocol.pk}
+    )
     if form.is_valid():
         protocol.event_date = form.cleaned_data['event_date']
         protocol.save(update_fields=['event_date'])
@@ -258,10 +323,16 @@ def set_protocol_event_date(request, pk):
 @require_http_methods(['GET'])
 def known_participants(request):
     """Список участников в базе (уже учтённых)."""
-    participants = KnownParticipant.objects.all().order_by('last_name', 'first_name')
-    return render(request, 'protocols/known_participants.html', {
-        'participants': participants,
-    })
+    participants = KnownParticipant.objects.all().order_by(
+        'last_name', 'first_name'
+    )
+    return render(
+        request,
+        'protocols/known_participants.html',
+        {
+            'participants': participants,
+        },
+    )
 
 
 @require_http_methods(['GET'])
@@ -272,7 +343,10 @@ def export_results(request, pk):
     lines = [r.raw_line for r in results]
 
     base_title = clean_protocol_title(protocol.title or '') or f'protocol_{pk}'
-    safe_title = re.sub(r'[^0-9A-Za-zА-Яа-я _\-\.]+', '', base_title).strip() or f'protocol_{pk}'
+    safe_title = (
+        re.sub(r'[^0-9A-Za-zА-Яа-я _\-\.]+', '', base_title).strip()
+        or f'protocol_{pk}'
+    )
     filename = safe_title.replace(' ', '_') + '.txt'
 
     content = '\n'.join(lines)
@@ -299,7 +373,9 @@ def season_export_page(request):
         filename = f'season_{date_from}_{date_to}.xlsx'
         response = HttpResponse(
             content,
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            content_type=(
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ),
         )
         response['Content-Disposition'] = (
             f"attachment; filename*=UTF-8''{quote(filename)}"
@@ -322,11 +398,17 @@ def export_season_excel_view(request):
     if ranking_id:
         ranking = get_object_or_404(SeasonRanking, pk=ranking_id)
         content = export_season_excel(ranking)
-        if getattr(ranking, 'date_from', None) and getattr(ranking, 'date_to', None):
-            filename = f'season_{ranking.date_from}_{ranking.date_to}.xlsx'
+        if getattr(ranking, 'date_from', None) and getattr(
+            ranking, 'date_to', None
+        ):
+            filename = (
+                f'season_{ranking.date_from}_{ranking.date_to}.xlsx'
+            )
             response = HttpResponse(
                 content,
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                content_type=(
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                ),
             )
             response['Content-Disposition'] = (
                 f"attachment; filename*=UTF-8''{quote(filename)}"
@@ -346,8 +428,13 @@ def export_season_excel_view(request):
     elif request.GET.get('date_from') and request.GET.get('date_to'):
         try:
             from datetime import datetime
-            date_from = datetime.strptime(request.GET['date_from'], '%Y-%m-%d').date()
-            date_to = datetime.strptime(request.GET['date_to'], '%Y-%m-%d').date()
+
+            date_from = datetime.strptime(
+                request.GET['date_from'], '%Y-%m-%d'
+            ).date()
+            date_to = datetime.strptime(
+                request.GET['date_to'], '%Y-%m-%d'
+            ).date()
         except (ValueError, TypeError):
             return HttpResponse(
                 'Некорректные даты. Используйте date_from=YYYY-MM-DD&date_to=YYYY-MM-DD.',
@@ -358,7 +445,9 @@ def export_season_excel_view(request):
         filename = f'season_{date_from}_{date_to}.xlsx'
         response = HttpResponse(
             content,
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            content_type=(
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ),
         )
         response['Content-Disposition'] = (
             f"attachment; filename*=UTF-8''{quote(filename)}"
@@ -375,10 +464,14 @@ def export_season_excel_view(request):
     if year is not None and season:
         filename = f'season_{year}_{season_display}.xlsx'
     else:
-        filename = f'season_ranking_{ranking_id}.xlsx' if ranking_id else 'season.xlsx'
+        filename = (
+            f'season_ranking_{ranking_id}.xlsx' if ranking_id else 'season.xlsx'
+        )
     response = HttpResponse(
         content,
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        content_type=(
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        ),
     )
     response['Content-Disposition'] = (
         f"attachment; filename*=UTF-8''{quote(filename)}"

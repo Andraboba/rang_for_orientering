@@ -32,7 +32,7 @@ Playwright НЕ нужен!
 
 import re
 import logging
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -106,13 +106,20 @@ def _extract_group_urls(header_html: str, base_url: str = "https://orgeo.ru") ->
     return urls
 
 
-def _fetch_orgeo_meta(event_uid: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def _fetch_orgeo_meta(event_uid: str) -> Dict:
     """
     Получает метаданные соревнования из JSON API Orgeo.
     event_uid может быть alias (строка) или числовой ID.
-    Возвращает (event_id, event_name, event_date, error).
-    event_date — строка вида "2026-03-01" (только дата, без времени).
+
+    Возвращает dict:
+        event_id:   str или None
+        event_name: str или None  (название соревнования)
+        event_date: str или None  (дата первого дня, "YYYY-MM-DD")
+        days:       list[dict]     (дни соревнования)
+                    каждый день: {sub_id: str, name: str, date: str}
+        error:      str или None
     """
+    result = dict(event_id=None, event_name=None, event_date=None, days=[], error=None)
     try:
         session = _make_session()
         resp = session.get(
@@ -122,26 +129,38 @@ def _fetch_orgeo_meta(event_uid: str) -> Tuple[Optional[str], Optional[str], Opt
         )
         resp.raise_for_status()
         data = resp.json()
-        event_id = data.get("event_id")
-        # Название и дата лежат в subs[0]
-        event_name = None
-        event_date = None
+        result["event_id"] = str(data["event_id"]) if data.get("event_id") else None
+
         subs = data.get("subs") or []
         if subs and isinstance(subs, list):
-            event_name = subs[0].get("event_name")
-            # datetime приходит как "2026-03-01 11:30:00", берём только дату
-            dt_str = subs[0].get("datetime") or ""
-            if dt_str:
-                event_date = dt_str.split()[0]  # "2026-03-01"
-        return str(event_id) if event_id else None, event_name, event_date, None
+            result["event_name"] = subs[0].get("event_name")
+            # Дата первого дня
+            dt0 = subs[0].get("datetime") or ""
+            if dt0:
+                result["event_date"] = dt0.split()[0]
+
+            # Собираем все дни (каждый sub — отдельный день)
+            for sub in subs:
+                sub_id = sub.get("sub_id")
+                day_name = sub.get("name") or ""
+                day_dt = sub.get("datetime") or ""
+                day_date = day_dt.split()[0] if day_dt else ""
+                if sub_id:
+                    result["days"].append({
+                        "sub_id": str(sub_id),
+                        "name": day_name,
+                        "date": day_date,
+                    })
+        return result
     except Exception as e:
-        return None, None, None, str(e)
+        result["error"] = str(e)
+        return result
 
 
-def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], List[Dict], Optional[str]]:
     """
     Нормализует любой URL Orgeo в формат https://orgeo.ru/online/{event_id}
-    и возвращает название и дату соревнования.
+    и возвращает название, дату и список дней соревнования.
 
     Поддерживаемые форматы:
       - https://orgeo.ru/live/#/winter26       → резолвим alias через JSON API
@@ -150,8 +169,10 @@ def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], Opti
       - https://orgeo.ru/online/48979          → без изменений
       - https://orgeo.ru/online/finish/48979?… → https://orgeo.ru/online/48979
 
-    Возвращает (normalized_url, event_title, event_date, error).
-    event_date — строка "YYYY-MM-DD" или None.
+    Возвращает (normalized_url, event_title, event_date, days, error).
+      event_date — строка "YYYY-MM-DD" или None (1-й день).
+      days — список дней [{sub_id, name, date}, ...].
+             Для однодневных соревнований — 1 элемент.
     """
     url = url.strip()
     base_url = "https://orgeo.ru"
@@ -177,22 +198,27 @@ def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], Opti
             event_uid = m.group(1)
 
     if not event_uid:
-        return "", None, None, f"Не удалось распознать формат URL Orgeo: {url}"
+        return "", None, None, [], f"Не удалось распознать формат URL Orgeo: {url}"
 
-    # ── Дёргаем JSON API — получаем event_id + название + дату ──
-    event_id, event_name, event_date, api_err = _fetch_orgeo_meta(event_uid)
-    if api_err:
+    # ── Дёргаем JSON API — получаем event_id + название + дату + дни ──
+    meta = _fetch_orgeo_meta(event_uid)
+    if meta["error"]:
         # Если uid уже числовой — можно попробовать без API
         if event_uid.isdigit():
-            logger.warning("Orgeo: JSON API недоступен (%s), используем ID напрямую", api_err)
-            return f"{base_url}/online/{event_uid}", None, None, None
-        return "", None, None, f"Ошибка резолва '{event_uid}': {api_err}"
+            logger.warning("Orgeo: JSON API недоступен (%s), используем ID напрямую", meta["error"])
+            return f"{base_url}/online/{event_uid}", None, None, [], None
+        return "", None, None, [], f"Ошибка резолва '{event_uid}': {meta['error']}"
 
+    event_id = meta["event_id"]
     if not event_id:
-        return "", None, None, f"JSON API не вернул event_id для '{event_uid}'"
+        return "", None, None, [], f"JSON API не вернул event_id для '{event_uid}'"
 
-    logger.info("Orgeo: '%s' → event_id=%s, name='%s', date='%s'", event_uid, event_id, event_name, event_date)
-    return f"{base_url}/online/{event_id}", event_name, event_date, None
+    days = meta["days"]
+    logger.info(
+        "Orgeo: '%s' → event_id=%s, name='%s', date='%s', days=%d",
+        event_uid, event_id, meta["event_name"], meta["event_date"], len(days),
+    )
+    return f"{base_url}/online/{event_id}", meta["event_name"], meta["event_date"], days, None
 
 
 def _extract_main_frame_url(frameset_html: str, base_url: str) -> Optional[str]:
@@ -214,46 +240,109 @@ def _extract_main_frame_url(frameset_html: str, base_url: str) -> Optional[str]:
     return None
 
 
+def _fetch_day_tables(
+    event_id: str,
+    sub_id: str,
+    session: requests.Session,
+) -> Tuple[List[str], List[str]]:
+    """
+    Загружает все группы одного дня (sub_id).
+    Возвращает (list[html], list[errors]).
+    """
+    base_url = "https://orgeo.ru"
+    header_url = f"{base_url}/online/top?id={event_id}&s={sub_id}"
+    header_html = _get(header_url, session)
+    group_urls = _extract_group_urls(header_html, base_url)
+
+    collected: List[str] = []
+    errors: List[str] = []
+
+    for g_url in group_urls:
+        try:
+            html = _get(g_url, session)
+            if "Фамилия" in html or "<table" in html:
+                collected.append(html)
+            else:
+                logger.warning("Orgeo: нет таблицы в ответе %s", g_url)
+        except Exception as e:
+            err_msg = f"{g_url}: {e}"
+            logger.warning("Orgeo: ошибка загрузки группы: %s", err_msg)
+            errors.append(err_msg)
+
+    return collected, errors
+
+
 def fetch_orgeo_tables(url: str, timeout_ms: int = 30000) -> Tuple[Optional[List[str]], Optional[str]]:
     """
-    Загружает ВСЕ группы соревнования по url.
+    Загружает ВСЕ группы ВСЕХ дней соревнования по url.
 
     Принимает ЛЮБОЙ формат URL Orgeo:
       - https://orgeo.ru/live/#/winter26
       - https://orgeo.ru/live/#/48979
       - https://orgeo.ru/online/48979
 
+    Для многодневных соревнований загружает все дни последовательно.
+
     Возвращает (list[html], None) при успехе или (None, error_msg) при ошибке.
     Каждый элемент списка — полный HTML одной группы с таблицей результатов.
     """
     try:
-        # ── Шаг 0: Нормализуем URL ──
-        resolved_url, _title, _date, err = resolve_orgeo_url(url)
+        # ── Шаг 0: Нормализуем URL, получаем список дней ──
+        resolved_url, _title, _date, days, err = resolve_orgeo_url(url)
         if err:
             return None, err
-        url = resolved_url
-        logger.info("Orgeo: нормализованный URL: %s", url)
+
+        # Извлекаем event_id из нормализованного URL
+        m = re.search(r'/online/(\d+)', resolved_url)
+        event_id = m.group(1) if m else None
 
         session = _make_session()
         base_url = "https://orgeo.ru"
 
-        # ── Шаг 1: Загружаем главную страницу (frameset) ──
+        # ── Если есть список дней и event_id — грузим все дни напрямую ──
+        if days and event_id:
+            logger.info(
+                "Orgeo: многодневное соревнование, %d дней: %s",
+                len(days),
+                ", ".join(f"{d['name']} ({d['date']})" for d in days),
+            )
+            all_collected: List[str] = []
+            all_errors: List[str] = []
+
+            for day in days:
+                sub_id = day["sub_id"]
+                logger.info(
+                    "Orgeo: загружаем день sub_id=%s: %s (%s)",
+                    sub_id, day["name"], day["date"],
+                )
+                tables, errs = _fetch_day_tables(event_id, sub_id, session)
+                all_collected.extend(tables)
+                all_errors.extend(errs)
+
+            if all_collected:
+                logger.info(
+                    "Orgeo: итого загружено %d таблиц из %d дней",
+                    len(all_collected), len(days),
+                )
+                return all_collected, None
+            return None, f"Не получено ни одной таблицы. Ошибки: {'; '.join(all_errors)}"
+
+        # ── Фолбэк: один день или нет инфы о днях — старый алгоритм через frameset ──
+        url = resolved_url
+        logger.info("Orgeo: нормализованный URL: %s", url)
+
         frameset_html = _get(url, session)
 
-        # ── Шаг 2: Находим URL header-фрейма ──
         header_url = _extract_header_url(frameset_html, base_url)
         if not header_url:
-            # Может, нам сразу дали URL группы (не frameset)?
             if "Фамилия" in frameset_html or "<table" in frameset_html:
                 return [frameset_html], None
             return None, f"Не удалось найти header-фрейм в {url}"
 
-        # ── Шаг 3: Загружаем header, извлекаем ссылки на группы ──
         header_html = _get(header_url, session)
         group_urls = _extract_group_urls(header_html, base_url)
 
         if not group_urls:
-            # Попробуем хотя бы main-фрейм
             main_url = _extract_main_frame_url(frameset_html, base_url)
             if main_url:
                 html = _get(main_url, session)
@@ -262,7 +351,6 @@ def fetch_orgeo_tables(url: str, timeout_ms: int = 30000) -> Tuple[Optional[List
 
         logger.info("Orgeo: найдено %d групп, загружаем...", len(group_urls))
 
-        # ── Шаг 4: Загружаем каждую группу ──
         collected: List[str] = []
         errors: List[str] = []
 
@@ -297,7 +385,7 @@ def fetch_orgeo_with_browser(url: str, timeout_ms: int = 25000) -> Tuple[Optiona
     """
     try:
         # Нормализуем URL
-        resolved_url, _title, _date, err = resolve_orgeo_url(url)
+        resolved_url, _title, _date, _days, err = resolve_orgeo_url(url)
         if err:
             return None, err
         url = resolved_url
