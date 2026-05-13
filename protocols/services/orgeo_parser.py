@@ -115,11 +115,11 @@ def _seconds_from_time(s: str) -> Optional[int]:
 
 
 def _calc_points(t_actual_sec: int, t_leader_sec: int) -> int:
-    """Очки по формуле (2 - t_actual/t_leader) * 1000, не меньше 1."""
+    """Очки по формуле (2 - t_actual/t_leader) * 1000, минимум 1 при наличии времени."""
     if t_leader_sec <= 0:
         return 0
-    points = max(1 , (2 - t_actual_sec / t_leader_sec) * 1000)
-    return max(1, points) if points > 0 else 0
+    points = int((2 - t_actual_sec / t_leader_sec) * 1000)
+    return max(1, points)
 
 
 def _count_participants(rows_html: List[str]) -> int:
@@ -159,7 +159,7 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
     group_name, place, place_out_of, last_name, first_name, points, raw_line.
 
     Фильтрация:
-      1) если team_name задан — фильтруем по колонке «Команда»;
+      1) если team_name задан — берём участников команды ИЛИ известных участников из базы;
       2) иначе, если base_pairs не пуст — берём только известных участников (сравнение без учёта регистра);
       3) если и то и другое пусто — берём всех.
 
@@ -211,7 +211,9 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
 
         # ── Фильтрация ──
         if team_name:
-            if team_name.lower() not in team_cell.lower():
+            team_matches = team_name.lower() in team_cell.lower()
+            known_matches = key_normalized in known
+            if not team_matches and not known_matches:
                 continue
         elif known:
             if key_normalized not in known:

@@ -22,8 +22,8 @@ def clean_protocol_title(title: str) -> str:
     title — исходное название (может быть пустым).
     Возвращает очищенную строку.
     """
-    if not title or not isinstance(title, str):
-        return title or ''
+    if not isinstance(title, str) or not title:
+        return ''
     text = title.strip()
     for phrase in NOISE_PHRASES:
         text = text.replace(phrase, ' ')

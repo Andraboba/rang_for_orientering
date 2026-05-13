@@ -5,17 +5,38 @@
 """
 import re
 from typing import List, Tuple, Optional
+from urllib.parse import urlparse
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
+
+# Разрешённые схемы для загрузки по URL.
+# Защита от SSRF/LFI: urlopen() по умолчанию умеет открывать file://, ftp:// и др. —
+# пользовательский ввод не должен этого делать.
+_ALLOWED_URL_SCHEMES = ('http', 'https')
+
+
+def _validate_url_scheme(url: str) -> Optional[str]:
+    """Возвращает None, если схема URL безопасна, иначе сообщение об ошибке."""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES:
+        return f'Недопустимая схема URL: {parsed.scheme!r}. Разрешены: http, https.'
+    if not parsed.netloc:
+        return 'URL не содержит имени хоста.'
+    return None
 
 
 def fetch_url(url: str, encoding_utf8: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """
     Загружает HTML по URL. Возвращает (text, error_message).
+    Принимаем только http/https (защита от SSRF через file://, ftp:// и т.п.).
     """
+    scheme_err = _validate_url_scheme(url)
+    if scheme_err:
+        return None, scheme_err
     try:
         req = Request(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; ProtocolParser/1.0)'})
-        with urlopen(req, timeout=30) as resp:
+        # Схема уже валидирована выше, но bandit B310 просит отметить явно.
+        with urlopen(req, timeout=30) as resp:  # nosec B310 - scheme validated above
             raw = resp.read()
         encoding = 'utf-8' if encoding_utf8 else 'windows-1251'
         text = raw.decode(encoding)
@@ -101,11 +122,11 @@ def _seconds_from_time(s: str) -> Optional[int]:
 
 
 def _calc_points(t_actual_sec: int, t_limit_sec: int) -> int:
-    """Очки по формуле (2 - t_actual/t_limit) * 1000, не меньше 1."""
+    """Очки по формуле (2 - t_actual/t_limit) * 1000, минимум 1 при наличии времени."""
     if t_limit_sec <= 0:
         return 0
     points = int((2 - t_actual_sec / t_limit_sec) * 1000)
-    return max(1, points) if points > 0 else 0
+    return max(1, points)
 
 
 def process_protocol_pre(
@@ -125,6 +146,10 @@ def process_protocol_pre(
             dlin.append(i)
     dlin.append(len(lines))
 
+    # Нормализованная база для поиска без учёта регистра
+    known_lower = {(ln.strip().lower(), fn.strip().lower()) for ln, fn in base_pairs}
+    team_lower = team_name.strip().lower() if team_name else ''
+
     tlid = None
     for y in lines:
         m = _parse_line_pre(y)
@@ -142,7 +167,10 @@ def process_protocol_pre(
                 except (ValueError, IndexError):
                     pass
         key = (m[1], m[2])
-        if team_name not in m and key not in base_pairs:
+        key_lower = (m[1].lower(), m[2].lower())
+        team_matches = bool(team_lower and team_lower in y.lower())
+        known_matches = key_lower in known_lower
+        if not team_matches and not known_matches:
             continue
         if m[-1] in ("3.13.12.2", "п.3.13.12.3", "п.3.13.12.2", "п.п.7.2.6"):
             result = 0
@@ -194,9 +222,16 @@ def process_protocol_sfr(
             dlin.append(i)
     dlin.append(len(lines))
 
+    known_lower = {(ln.strip().lower(), fn.strip().lower()) for ln, fn in base_pairs}
+    team_lower = team_name.strip().lower() if team_name else ''
+
     for y in lines:
         m = _parse_line_sfr(y)
-        if not m or team_name not in m and (m[2], m[3]) not in base_pairs:
+        if not m:
+            continue
+        team_matches = bool(team_lower and team_lower in y.lower())
+        known_matches = (m[2].strip().lower(), m[3].strip().lower()) in known_lower
+        if not team_matches and not known_matches:
             continue
         if "cнят" not in m and "снят" not in m:
             indices = [i for i in range(len(m)) if m[i] == m[0]]

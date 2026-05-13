@@ -19,11 +19,16 @@ from ..models import (
     SeasonRankingEntry,
 )
 
+GROUP_SPLIT_EXCEPTIONS = {
+    ('поздновский', 'сергей'),
+}
+
 
 def _build_name_disambiguation(protocol_ids):
     """
-    Для каждого (Фамилия, Имя) определяет, нужно ли разделять участников по группам.
-    Если один и тот же ФИО встречается в нескольких группах, возвращаем True.
+    Определяет, нужно ли разделять участников по группам.
+    Разделение применяется только к ФИО из GROUP_SPLIT_EXCEPTIONS
+    и только если человек встречается в нескольких группах.
     """
     if not protocol_ids:
         return {}
@@ -37,7 +42,12 @@ def _build_name_disambiguation(protocol_ids):
         group_name = (r.get('group_name') or '').strip()
         if group_name:
             groups_by_name[key].add(group_name)
-    return {key: len(groups) > 1 for key, groups in groups_by_name.items()}
+    split_flags = {}
+    for key, groups in groups_by_name.items():
+        ln, fn = key
+        normalized = ((ln or '').strip().lower(), (fn or '').strip().lower())
+        split_flags[key] = normalized in GROUP_SPLIT_EXCEPTIONS and len(groups) > 1
+    return split_flags
 
 
 def _display_person_name(last_name, first_name, group_name, need_split):
@@ -176,28 +186,15 @@ def build_points_data_from_protocols(protocols):
     rows = (
         ProtocolResult.objects.filter(protocol_id__in=protocol_ids)
         .select_related('protocol', 'protocol__championship_level')
-        .values(
-            'last_name',
-            'first_name',
-            'group_name',
-            'points',
-            'protocol__importance',
-            'protocol__championship_level__coefficient',
-        )
     )
     totals = defaultdict(float)
     for r in rows:
-        ln, fn = r['last_name'], r['first_name']
+        ln, fn = r.last_name, r.first_name
         if (ln.strip().lower(), fn.strip().lower()) in veteran_set:
             continue
         need_split = split_by_group.get((ln, fn), False)
-        person_key = _display_person_name(ln, fn, r.get('group_name'), need_split)
-        coefficient = (
-            r.get('protocol__championship_level__coefficient')
-            or r.get('protocol__importance')
-            or 1.0
-        )
-        totals[person_key] += float(r.get('points') or 0) * float(coefficient)
+        person_key = _display_person_name(ln, fn, r.group_name, need_split)
+        totals[person_key] += float(r.weighted_points)
     return [
         (last_name, first_name, total)
         for (last_name, first_name), total in sorted(

@@ -113,6 +113,13 @@ class Protocol(models.Model):
     def __str__(self):
         return self.title or self.source_url or f'Протокол #{self.pk}'
 
+    @property
+    def effective_coefficient(self) -> float:
+        """Коэффициент старта: уровень первенства или importance, если уровень не задан."""
+        if self.championship_level and self.championship_level.coefficient:
+            return float(self.championship_level.coefficient)
+        return float(self.importance or 1.0)
+
 
 class KnownParticipant(models.Model):
     """Уже учтённый участник (фамилия + имя) для исключения дублей."""
@@ -162,6 +169,11 @@ class ProtocolResult(models.Model):
     )
     points = models.PositiveIntegerField('Очки', default=0)
     raw_line = models.CharField('Исходная строка', max_length=500, blank=True)
+    team_member = models.BooleanField(
+        'В составе команды',
+        default=True,
+        help_text='False — участник из PDF, не распознанный как член команды; можно включить вручную.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -171,6 +183,13 @@ class ProtocolResult(models.Model):
 
     def __str__(self):
         return f'{self.place} из {self.place_out_of} — {self.last_name} {self.first_name}, очки: {self.points}'
+
+    @property
+    def weighted_points(self) -> float:
+        """Баллы с учетом коэффициента старта протокола."""
+        if not self.protocol_id:
+            return float(self.points or 0)
+        return float(self.points or 0) * self.protocol.effective_coefficient
 
 
 class SeasonRanking(models.Model):

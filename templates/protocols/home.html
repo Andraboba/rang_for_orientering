@@ -18,7 +18,43 @@
             <div class="form-group">
                 <label>{{ form.format_sfr }} {{ form.format_sfr.label }}</label>
             </div>
+            <div class="form-group">
+                <label for="id_championship_level">{{ form.championship_level.label }}</label>
+                {{ form.championship_level }}
+                {% if form.championship_level.help_text %}<small class="meta">{{ form.championship_level.help_text }}</small>{% endif %}
+                {% if form.championship_level.errors %}<span class="error">{{ form.championship_level.errors.0 }}</span>{% endif %}
+            </div>
             <button type="submit" class="btn">Загрузить</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Загрузить PDF-протокол (Пролог + Финиш)</h2>
+        <p class="meta">Для сканированных PDF с двухэтапными результатами. Создаёт два протокола — «Пролог» и «Финиш». Обработка занимает несколько минут.</p>
+        <form method="post" action="{% url 'protocols:load_pdf_protocol' %}" enctype="multipart/form-data">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="id_pdf_file">PDF файл</label>
+                <input type="file" name="pdf_file" id="id_pdf_file" accept=".pdf" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label for="id_pdf_title">Название (необязательно)</label>
+                <input type="text" name="title" id="id_pdf_title" class="form-control" placeholder="Будет определено из PDF">
+            </div>
+            <div class="form-group">
+                <label for="id_pdf_event_date">Дата соревнований (необязательно)</label>
+                <input type="date" name="event_date" id="id_pdf_event_date" class="form-control">
+            </div>
+            <div class="form-group">
+                <label for="id_pdf_championship_level">Уровень первенства</label>
+                <select name="championship_level" id="id_pdf_championship_level" class="form-control">
+                    <option value="">Не выбрано</option>
+                    {% for cl in championship_levels %}
+                        <option value="{{ cl.pk }}">{{ cl }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn">Загрузить PDF</button>
         </form>
     </div>
 
@@ -40,7 +76,7 @@
                 {% endfor %}
             </ul>
         {% else %}
-            <p class="meta">Пока нет загруженных протоколов. Вставьте ссылку на протокол WinOrient выше.</p>
+            <p class="meta">Пока нет загруженных протоколов. Вставьте ссылку на WinOrient, Orgeo или SportIdent выше.</p>
         {% endif %}
     </div>
 {% endblock %}

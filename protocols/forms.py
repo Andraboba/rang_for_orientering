@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from django import forms
+from .models import ChampionshipLevel
 
 
 class SetProtocolEventDateForm(forms.Form):
@@ -62,6 +63,18 @@ class LoadProtocolForm(forms.Form):
         required=False,
         initial=False,
     )
+    championship_level = forms.ModelChoiceField(
+        label='Тип старта (уровень первенства)',
+        queryset=ChampionshipLevel.objects.none(),
+        required=False,
+        empty_label='Не выбрано',
+        widget=forms.Select(attrs={'class': 'form-control'}),
+        help_text='Если выбран уровень, для сезонного зачета будет использоваться его коэффициент.',
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['championship_level'].queryset = ChampionshipLevel.objects.all()
 
 
 class EditProtocolTitleForm(forms.Form):
@@ -78,6 +91,43 @@ class EditProtocolTitleForm(forms.Form):
     protocol_id = forms.IntegerField(widget=forms.HiddenInput())
 
 
+class PDFProtocolLoadForm(forms.Form):
+    """Форма загрузки сканированного PDF-протокола (двухэтапный: Пролог + Финиш)."""
+    pdf_file = forms.FileField(
+        label='PDF файл',
+        help_text='Сканированный PDF с двухэтапными результатами (Пролог + Финиш).',
+        widget=forms.ClearableFileInput(attrs={'accept': '.pdf'}),
+    )
+    title = forms.CharField(
+        label='Название соревнований',
+        required=False,
+        max_length=300,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Будет определено из PDF, если оставить пустым',
+        }),
+    )
+    event_date = forms.DateField(
+        label='Дата соревнований',
+        required=False,
+        widget=forms.DateInput(attrs={
+            'type': 'date',
+            'class': 'form-control',
+        }),
+    )
+    championship_level = forms.ModelChoiceField(
+        label='Тип старта (уровень первенства)',
+        queryset=ChampionshipLevel.objects.none(),
+        required=False,
+        empty_label='Не выбрано',
+        widget=forms.Select(attrs={'class': 'form-control'}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['championship_level'].queryset = ChampionshipLevel.objects.all()
+
+
 class ProcessProtocolForm(forms.Form):
     """Форма обработки уже загруженного протокола по названию команды или по базе участников (Orgeo)."""
     team_name = forms.CharField(
@@ -86,7 +136,7 @@ class ProcessProtocolForm(forms.Form):
         required=False,
         widget=forms.TextInput(attrs={
             'class': 'form-control',
-            'placeholder': 'Например: СК Фотон или оставьте пустым для Orgeo — поиск по базе участников',
+            'placeholder': 'Название команды (необязательно) — или оставьте пустым для поиска по базе участников',
         })
     )
     protocol_id = forms.IntegerField(widget=forms.HiddenInput())

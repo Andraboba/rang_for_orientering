@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:cloud.mail.ru)",
+      "Read(//mnt/c/Users/andre/PycharmProjects/**)",
+      "Bash(ls tmp_protocol.pdf)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import pdfplumber; print\\('pdfplumber ok'\\)\" 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import fitz; print\\('pymupdf ok'\\)\" 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import pytesseract; print\\('pytesseract ok'\\)\" 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import pdf2image; print\\('pdf2image ok'\\)\" 2>&1)",
+      "PowerShell(tesseract *)",
+      "PowerShell(.venv\\\\Scripts\\\\pip.exe install pymupdf --quiet 2>&1 | Select-Object -Last 3)",
+      "Bash(python3 -m pip install pymupdf --quiet)",
+      "PowerShell(cmd /c \"dir /b \"\"C:\\\\Program Files\\\\Tesseract-OCR\\\\\"\"\")",
+      "PowerShell(cmd /c \"dir /b \"\"C:\\\\Program Files\\\\Tesseract-OCR\\\\tessdata\\\\\"\"\")",
+      "Bash(python *)",
+      "Bash(curl -s \"http://127.0.0.1:8000/protocol/67/pdf-ocr-text/\")"
+    ]
+  }
+}

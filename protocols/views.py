@@ -7,9 +7,10 @@ from django.views.decorators.http import require_http_methods
 from urllib.parse import quote
 import re
 
-from .models import Protocol, ProtocolResult, KnownParticipant, SeasonRanking
+from .models import Protocol, ProtocolResult, KnownParticipant, SeasonRanking, ChampionshipLevel
 from .forms import (
     LoadProtocolForm,
+    PDFProtocolLoadForm,
     ProcessProtocolForm,
     SetProtocolEventDateForm,
     SeasonExportDateRangeForm,
@@ -26,6 +27,11 @@ from .services.orgeo_browser import (
     fetch_orgeo_tables,
     ORGEO_TABLES_DELIMITER,
     resolve_orgeo_url,
+)
+from .services.sportident_parser import (
+    SPORTIDENT_TABLES_DELIMITER,
+    fetch_sportident_tables,
+    parse_sportident,
 )
 from .services.season_export import (
     export_season_excel,
@@ -50,10 +56,12 @@ def home(request):
         url = form.cleaned_data['url']
         encoding_utf8 = form.cleaned_data['encoding_utf8']
         format_sfr = form.cleaned_data['format_sfr']
+        championship_level = form.cleaned_data['championship_level']
 
         url_to_fetch = url
         orgeo_title = None
         orgeo_date = None  # дата соревнования (YYYY-MM-DD) из API Orgeo
+        sportident_title = None
 
         # Orgeo: resolve_orgeo_url нормализует любую ссылку
         # (live/#/winter26, live/#/48979, online/48979, finish/...) в /online/{id}
@@ -92,6 +100,14 @@ def home(request):
                     text, err = fetch_orgeo_document(app_url)
             encoding_utf8 = True
             format_sfr = False
+        elif 'sportident.online' in url:
+            tables, sportident_title, err = fetch_sportident_tables(url)
+            if err:
+                messages.error(request, f'SportIdent: {err}')
+                return redirect('protocols:home')
+            text = SPORTIDENT_TABLES_DELIMITER.join(tables or [])
+            encoding_utf8 = True
+            format_sfr = False
         else:
             text, err = fetch_url(url_to_fetch, encoding_utf8=encoding_utf8)
         if err:
@@ -106,9 +122,11 @@ def home(request):
                     'Установите Playwright в то же окружение, откуда запускаете Django: '
                     'pip install playwright, затем: playwright install chromium',
                 )
-        # Для Orgeo используем название из API, для остальных — extract_title.
+        # Для Orgeo/SportIdent используем название из API/страницы события.
         if 'orgeo.ru' in url and orgeo_title:
             title = orgeo_title
+        elif 'sportident.online' in url and sportident_title:
+            title = sportident_title
         else:
             title = extract_title(text, format_sfr)
         raw_title = title or url[:80]
@@ -118,6 +136,7 @@ def home(request):
             raw_html=text,
             encoding_utf8=encoding_utf8,
             format_sfr=format_sfr,
+            championship_level=championship_level,
         )
         if orgeo_date:
             try:
@@ -140,6 +159,7 @@ def home(request):
         {
             'form': form,
             'protocols': protocols,
+            'championship_levels': ChampionshipLevel.objects.all().order_by('order', 'name'),
         },
     )
 
@@ -148,16 +168,33 @@ def protocol_detail(request, pk):
     """Просмотр протокола и форма обработки по команде."""
     protocol = get_object_or_404(Protocol, pk=pk)
     is_orgeo = bool(protocol.source_url and 'orgeo.ru' in protocol.source_url)
-    is_winorient = not is_orgeo
+    is_sportident = bool(
+        protocol.source_url and 'sportident.online' in protocol.source_url
+    )
+    is_pdf = bool(protocol.source_url and protocol.source_url.startswith('pdf_upload:'))
+    is_winorient = not is_orgeo and not is_sportident and not is_pdf
+    needs_manual_event_date = not is_orgeo and not is_pdf
 
     form = ProcessProtocolForm(initial={'protocol_id': protocol.pk})
     form.fields['protocol_id'].initial = protocol.pk
-    results = protocol.results.all()
 
-    # Для WinOrient: дата соревнований — из названия или запрос пользователю
+    results_qs = protocol.results.select_related(
+        'protocol',
+        'protocol__championship_level',
+    )
+    # Для PDF-протоколов храним все результаты; «командные» — team_member=True.
+    if is_pdf:
+        results = results_qs.filter(team_member=True)
+        all_pdf_results = results_qs.order_by('group_name', 'place')
+    else:
+        results = results_qs
+        all_pdf_results = None
+
+    # Для источников без API-даты (WinOrient/SportIdent):
+    # дата соревнований — из названия или запрос пользователю.
     date_form = None
     show_date_form = False
-    if is_winorient and not protocol.event_id:
+    if needs_manual_event_date and not protocol.event_date:
         parsed_date = parse_date_from_title(protocol.title or '')
         date_form = SetProtocolEventDateForm(
             initial={
@@ -169,18 +206,26 @@ def protocol_detail(request, pk):
 
     # Режим "показать всех участников Orgeo" для отладки/проверки.
     show_all = request.GET.get('show_all') == '1'
-    if show_all and is_orgeo:
+    if show_all and (is_orgeo or is_sportident):
+        delimiter = (
+            ORGEO_TABLES_DELIMITER if is_orgeo else SPORTIDENT_TABLES_DELIMITER
+        )
         chunks = (
-            protocol.raw_html.split(ORGEO_TABLES_DELIMITER)
-            if ORGEO_TABLES_DELIMITER in protocol.raw_html
+            protocol.raw_html.split(delimiter)
+            if delimiter in protocol.raw_html
             else [protocol.raw_html]
         )
         parsed = []
         for html_chunk in chunks:
             if html_chunk.strip():
-                parsed.extend(
-                    parse_orgeo(html_chunk, base_pairs=[], team_name='')
-                )
+                if is_orgeo:
+                    parsed.extend(
+                        parse_orgeo(html_chunk, base_pairs=[], team_name='')
+                    )
+                else:
+                    parsed.extend(
+                        parse_sportident(html_chunk, base_pairs=[], team_name='*')
+                    )
         protocol.results.all().delete()
         for r in parsed:
             ProtocolResult.objects.create(
@@ -193,9 +238,21 @@ def protocol_detail(request, pk):
                 points=r.get('points', 0),
                 raw_line=r.get('raw_line', ''),
             )
-        results = protocol.results.all()
+        results = protocol.results.select_related(
+            'protocol',
+            'protocol__championship_level',
+        )
 
     if request.method == 'POST':
+        # PDF-протоколы не перепарсиваются — результаты уже загружены при импорте.
+        if is_pdf:
+            messages.info(
+                request,
+                'PDF-протокол нельзя перепарсить — результаты загружены при импорте PDF. '
+                'Для обновления загрузите PDF снова.',
+            )
+            return redirect('protocols:protocol_detail', pk=pk)
+
         form = ProcessProtocolForm(
             request.POST, initial={'protocol_id': protocol.pk}
         )
@@ -208,27 +265,46 @@ def protocol_detail(request, pk):
                 KnownParticipant.objects.values_list('last_name', 'first_name')
             )
 
-            # Для Orgeo: парсим все таблицы (все группы), фильтр по команде или по базе.
-            if protocol.source_url and 'orgeo.ru' in protocol.source_url:
+            # Для Orgeo/SportIdent: парсим все таблицы (все группы),
+            # фильтр по команде или по базе.
+            if is_orgeo or is_sportident:
+                delimiter = (
+                    ORGEO_TABLES_DELIMITER
+                    if is_orgeo
+                    else SPORTIDENT_TABLES_DELIMITER
+                )
                 chunks = (
-                    protocol.raw_html.split(ORGEO_TABLES_DELIMITER)
-                    if ORGEO_TABLES_DELIMITER in protocol.raw_html
+                    protocol.raw_html.split(delimiter)
+                    if delimiter in protocol.raw_html
                     else [protocol.raw_html]
                 )
                 parsed = []
                 for html_chunk in chunks:
                     if html_chunk.strip():
-                        parsed.extend(
-                            parse_orgeo(
-                                html_chunk,
-                                base_pairs=base_pairs,
-                                team_name=team_name,
+                        if is_orgeo:
+                            parsed.extend(
+                                parse_orgeo(
+                                    html_chunk,
+                                    base_pairs=base_pairs,
+                                    team_name=team_name,
+                                )
                             )
-                        )
+                        else:
+                            parsed.extend(
+                                parse_sportident(
+                                    html_chunk,
+                                    base_pairs=base_pairs,
+                                    team_name=team_name,
+                                )
+                            )
             else:
-                # Старый режим для WinOrient и аналогов — по названию команды.
-                if not team_name:
-                    messages.warning(request, 'Введите название команды.')
+                # WinOrient: фильтр по команде, по базе участников, или по обоим.
+                # Если команда не указана — используем только базу участников.
+                if not team_name and not base_pairs:
+                    messages.warning(
+                        request,
+                        'Введите название команды или добавьте участников в базу.',
+                    )
                     return redirect('protocols:protocol_detail', pk=pk)
                 parsed = parse_and_process(
                     protocol.raw_html,
@@ -275,7 +351,10 @@ def protocol_detail(request, pk):
             'title_form': title_form,
             'form': form,
             'results': results,
+            'all_pdf_results': all_pdf_results,
             'is_orgeo': is_orgeo,
+            'is_sportident': is_sportident,
+            'is_pdf': is_pdf,
             'date_form': date_form,
             'show_date_form': show_date_form,
         },
@@ -477,6 +556,197 @@ def export_season_excel_view(request):
         f"attachment; filename*=UTF-8''{quote(filename)}"
     )
     return response
+
+
+@require_http_methods(['POST'])
+def load_pdf_protocol(request):
+    """
+    Загрузка сканированного PDF-протокола с двухэтапными результатами.
+    Создаёт два Protocol-объекта: «Пролог» и «Финиш».
+    Требует Tesseract OCR (winget install UB-Mannheim.TesseractOCR).
+    OCR 21 страницы занимает несколько минут — страница не реагирует, это нормально.
+    """
+    form = PDFProtocolLoadForm(request.POST, request.FILES)
+    if not form.is_valid():
+        for field_errors in form.errors.values():
+            for err in field_errors:
+                messages.error(request, err)
+        return redirect('protocols:home')
+
+    pdf_file = request.FILES['pdf_file']
+    title_override = (form.cleaned_data.get('title') or '').strip()
+    event_date_override = form.cleaned_data.get('event_date')
+    championship_level = form.cleaned_data.get('championship_level')
+
+    try:
+        from .services.pdf_parser import parse_pdf_protocol
+        pdf_bytes = pdf_file.read()
+        parsed = parse_pdf_protocol(pdf_bytes)
+    except ImportError as exc:
+        messages.error(request, str(exc))
+        return redirect('protocols:home')
+    except Exception as exc:
+        messages.error(request, f'Ошибка разбора PDF: {exc}')
+        return redirect('protocols:home')
+
+    for page_err in parsed.page_errors:
+        messages.warning(request, f'OCR: {page_err}')
+
+    if not parsed.prologue_results and not parsed.finish_results:
+        messages.warning(
+            request,
+            'В PDF не найдено результатов. '
+            'Убедитесь, что Tesseract установлен с русским языком (rus.traineddata).'
+        )
+        return redirect('protocols:home')
+
+    # База известных участников для автоматической отметки team_member=True.
+    known = {
+        (ln.strip().lower(), fn.strip().lower())
+        for ln, fn in KnownParticipant.objects.values_list('last_name', 'first_name')
+    }
+
+    base_title = title_override or parsed.title or pdf_file.name
+
+    # Дата: из формы → из PDF → None
+    event_date = event_date_override
+    if not event_date and parsed.event_date:
+        from datetime import datetime
+        for fmt in ('%d.%m.%Y', '%Y-%m-%d'):
+            try:
+                event_date = datetime.strptime(parsed.event_date, fmt).date()
+                break
+            except ValueError:
+                continue
+
+    source_label = f'pdf_upload:{pdf_file.name}'
+
+    prologue_protocol = None
+    finish_protocol = None
+
+    raw_ocr = parsed.raw_ocr_text  # сохраняем в оба протокола для отладки
+
+    if parsed.prologue_results:
+        prologue_protocol = Protocol.objects.create(
+            source_url=source_label,
+            title=f'{base_title} — Пролог',
+            raw_html=raw_ocr,
+            encoding_utf8=True,
+            format_sfr=False,
+            championship_level=championship_level,
+            event_date=event_date,
+        )
+        team_count = 0
+        for r in parsed.prologue_results:
+            is_known = (r['last_name'].strip().lower(), r['first_name'].strip().lower()) in known
+            if is_known:
+                team_count += 1
+            ProtocolResult.objects.create(
+                protocol=prologue_protocol,
+                group_name=r['group_name'],
+                place=r['place'],
+                place_out_of=r['place_out_of'],
+                last_name=r['last_name'],
+                first_name=r['first_name'],
+                points=r['points'],
+                raw_line=r['raw_line'],
+                team_member=is_known,
+            )
+        messages.success(
+            request,
+            f'Пролог: {team_count} участников из базы, '
+            f'всего в PDF: {len(parsed.prologue_results)}. '
+            'Откройте протокол, чтобы добавить пропущенных.',
+        )
+
+    if parsed.finish_results:
+        finish_protocol = Protocol.objects.create(
+            source_url=source_label,
+            title=f'{base_title} — Финиш',
+            raw_html=raw_ocr,
+            encoding_utf8=True,
+            format_sfr=False,
+            championship_level=championship_level,
+            event_date=event_date,
+        )
+        team_count = 0
+        for r in parsed.finish_results:
+            is_known = (r['last_name'].strip().lower(), r['first_name'].strip().lower()) in known
+            if is_known:
+                team_count += 1
+            ProtocolResult.objects.create(
+                protocol=finish_protocol,
+                group_name=r['group_name'],
+                place=r['place'],
+                place_out_of=r['place_out_of'],
+                last_name=r['last_name'],
+                first_name=r['first_name'],
+                points=r['points'],
+                raw_line=r['raw_line'],
+                team_member=is_known,
+            )
+        messages.success(
+            request,
+            f'Финиш: {team_count} участников из базы, '
+            f'всего в PDF: {len(parsed.finish_results)}.',
+        )
+
+    if not prologue_protocol and not finish_protocol:
+        messages.warning(request, 'В PDF не найдено результатов.')
+        return redirect('protocols:home')
+
+    if prologue_protocol:
+        return redirect('protocols:protocol_detail', pk=prologue_protocol.pk)
+    if finish_protocol:
+        return redirect('protocols:protocol_detail', pk=finish_protocol.pk)
+    return redirect('protocols:home')
+
+
+@require_http_methods(['GET'])
+def pdf_ocr_text(request, pk):
+    """Показывает сырой OCR-текст PDF-протокола для диагностики."""
+    protocol = get_object_or_404(Protocol, pk=pk)
+    if not (protocol.source_url and protocol.source_url.startswith('pdf_upload:')):
+        return HttpResponse('Не PDF протокол.', status=400, content_type='text/plain; charset=utf-8')
+    return HttpResponse(
+        protocol.raw_html or '(OCR-текст не сохранён — загрузите PDF снова)',
+        content_type='text/plain; charset=utf-8',
+    )
+
+
+@require_http_methods(['POST'])
+def pdf_update_team(request, pk):
+    """
+    Обновляет состав команды в PDF-протоколе:
+    принимает список ID выбранных ProtocolResult и ставит им team_member=True,
+    остальным — False.
+    """
+    protocol = get_object_or_404(Protocol, pk=pk)
+    if not (protocol.source_url and protocol.source_url.startswith('pdf_upload:')):
+        messages.error(request, 'Функция доступна только для PDF-протоколов.')
+        return redirect('protocols:protocol_detail', pk=pk)
+
+    selected_ids = set(request.POST.getlist('participant_ids'))
+    # Сбрасываем все, затем включаем выбранные.
+    protocol.results.update(team_member=False)
+    added_to_db = 0
+    if selected_ids:
+        protocol.results.filter(pk__in=selected_ids).update(team_member=True)
+        # Добавляем выбранных в базу участников, если их там ещё нет.
+        selected_results = protocol.results.filter(pk__in=selected_ids)
+        for r in selected_results:
+            _, created = KnownParticipant.objects.get_or_create(
+                last_name=r.last_name,
+                first_name=r.first_name,
+            )
+            if created:
+                added_to_db += 1
+
+    msg = f'Состав команды обновлён: {len(selected_ids)} участников.'
+    if added_to_db:
+        msg += f' В базу добавлено новых: {added_to_db}.'
+    messages.success(request, msg)
+    return redirect('protocols:protocol_detail', pk=pk)
 
 
 @require_http_methods(['POST'])
