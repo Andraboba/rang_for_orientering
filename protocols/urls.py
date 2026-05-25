@@ -17,4 +17,5 @@ urlpatterns = [
     path('protocol/<int:pk>/pdf-ocr-text/', views.pdf_ocr_text, name='pdf_ocr_text'),
     path('season-export/', views.season_export_page, name='season_export_page'),
     path('season-export-excel/', views.export_season_excel_view, name='export_season_excel'),
+    path('calendar/', views.calendar_view, name='calendar'),
 ]

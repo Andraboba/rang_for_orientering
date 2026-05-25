@@ -4,7 +4,11 @@
 {% block content %}
     <div class="card">
         <h2>Экспорт за период</h2>
-        <p class="meta">Выберите промежуток дат — в Excel попадют протоколы, дата соревнований которых попадает в этот период. В первой таблице — места по стартам (участники по алфавиту), во второй — баллы (если используется рейтинг сезона).</p>
+        <p class="meta">
+            Выберите промежуток дат — в Excel попадут протоколы, дата соревнований которых попадает в этот период.
+            Лист «Места» — места по всем стартам, лист «Баллы» — итоговые очки.
+            «Зачётных стартов» — если указать число, у каждого участника в зачёт идут только лучшие N стартов.
+        </p>
         <form method="post" action="{% url 'protocols:season_export_page' %}">
             {% csrf_token %}
             <div class="form-row" style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end;">
@@ -19,6 +23,11 @@
                     {% if form.date_to.errors %}<span class="error">{{ form.date_to.errors.0 }}</span>{% endif %}
                 </div>
                 <div class="form-group" style="flex: 0 0 auto;">
+                    <label for="id_max_starts">{{ form.max_starts.label }}</label>
+                    {{ form.max_starts }}
+                    {% if form.max_starts.errors %}<span class="error">{{ form.max_starts.errors.0 }}</span>{% endif %}
+                </div>
+                <div class="form-group" style="flex: 0 0 auto; align-self: flex-end;">
                     <button type="submit" class="btn">Скачать Excel</button>
                 </div>
             </div>

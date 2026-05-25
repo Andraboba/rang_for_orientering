@@ -448,7 +448,8 @@ def season_export_page(request):
     if request.method == 'POST' and form.is_valid():
         date_from = form.cleaned_data['date_from']
         date_to = form.cleaned_data['date_to']
-        content = export_season_excel_by_date_range(date_from, date_to)
+        max_starts = form.cleaned_data.get('max_starts')
+        content = export_season_excel_by_date_range(date_from, date_to, max_starts=max_starts)
         filename = f'season_{date_from}_{date_to}.xlsx'
         response = HttpResponse(
             content,
@@ -461,6 +462,74 @@ def season_export_page(request):
         )
         return response
     return render(request, 'protocols/season_export.html', {'form': form})
+
+
+@require_http_methods(['GET'])
+def calendar_view(request):
+    """Календарь соревнований: все протоколы с датами, сгруппированные по месяцам."""
+    import calendar as cal_mod
+    from collections import defaultdict
+    from django.db.models import Q
+
+    MONTHS_RU = [
+        '', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+        'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+    ]
+
+    qs = Protocol.objects.filter(
+        Q(event_date__isnull=False) | Q(event__date__isnull=False)
+    ).select_related('event')
+
+    dated_protocols = []
+    for p in qs:
+        d = (p.event.date if p.event else None) or p.event_date
+        if d:
+            dated_protocols.append((d, p))
+
+    available_years = sorted(set(d.year for d, _ in dated_protocols), reverse=True)
+
+    try:
+        selected_year = int(request.GET['year']) if request.GET.get('year') else None
+    except (ValueError, TypeError):
+        selected_year = None
+
+    if not selected_year or selected_year not in available_years:
+        selected_year = available_years[0] if available_years else None
+
+    months = []
+    if selected_year:
+        by_month = defaultdict(lambda: defaultdict(list))
+        for d, p in dated_protocols:
+            if d.year == selected_year:
+                by_month[d.month][d.day].append(p)
+
+        for month_num in range(1, 13):
+            month_events = dict(by_month[month_num])
+            has_events = bool(month_events)
+            weeks_raw = cal_mod.monthcalendar(selected_year, month_num)
+            weeks = []
+            for week in weeks_raw:
+                week_days = []
+                for day in week:
+                    if day == 0:
+                        week_days.append({'day': 0, 'protocols': [], 'has_events': False})
+                    else:
+                        protos = month_events.get(day, [])
+                        week_days.append({'day': day, 'protocols': protos, 'has_events': bool(protos)})
+                weeks.append(week_days)
+            months.append({
+                'month_num': month_num,
+                'month_name': MONTHS_RU[month_num],
+                'weeks': weeks,
+                'has_events': has_events,
+                'events_list': sorted(month_events.items()),
+            })
+
+    return render(request, 'protocols/calendar.html', {
+        'available_years': available_years,
+        'selected_year': selected_year,
+        'months': months,
+    })
 
 
 @require_http_methods(['GET'])
@@ -620,6 +689,13 @@ def load_pdf_protocol(request):
                 continue
 
     source_label = f'pdf_upload:{pdf_file.name}'
+
+    # Удаляем дубликаты от предыдущей загрузки того же файла.
+    old_qs = Protocol.objects.filter(source_url=source_label)
+    old_count = old_qs.count()
+    if old_count:
+        old_qs.delete()
+        messages.info(request, f'Удалены {old_count} ранее загруженных протокол(а) из файла «{pdf_file.name}».')
 
     prologue_protocol = None
     finish_protocol = None

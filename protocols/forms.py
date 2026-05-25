@@ -35,6 +35,20 @@ class SeasonExportDateRangeForm(forms.Form):
         }),
     )
 
+    max_starts = forms.IntegerField(
+        label='Зачётных стартов (макс.)',
+        required=False,
+        min_value=1,
+        max_value=99,
+        widget=forms.NumberInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'Все',
+            'min': '1',
+            'max': '99',
+            'style': 'width: 80px;',
+        }),
+    )
+
     def clean(self):
         data = super().clean()
         date_from = data.get('date_from')

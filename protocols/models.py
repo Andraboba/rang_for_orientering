@@ -122,9 +122,16 @@ class Protocol(models.Model):
 
 
 class KnownParticipant(models.Model):
-    """Уже учтённый участник (фамилия + имя) для исключения дублей."""
+    """Уже учтённый участник (фамилия + имя + группа) для исключения дублей."""
     last_name = models.CharField('Фамилия', max_length=100)
     first_name = models.CharField('Имя', max_length=100)
+    group_name = models.CharField(
+        'Группа',
+        max_length=50,
+        blank=True,
+        default='',
+        help_text='Например М12, Ж14. Заполните, если есть два участника с одинаковым ФИО в разных группах.',
+    )
     veteran = models.BooleanField(
         'Ветеран (не в зачёт сезона)',
         default=False,
@@ -134,9 +141,11 @@ class KnownParticipant(models.Model):
     class Meta:
         verbose_name = 'Участник (база)'
         verbose_name_plural = 'Участники (база)'
-        unique_together = [['last_name', 'first_name']]
+        unique_together = [['last_name', 'first_name', 'group_name']]
 
     def __str__(self):
+        if self.group_name:
+            return f'{self.last_name} {self.first_name} ({self.group_name})'
         return f'{self.last_name} {self.first_name}'
 
 

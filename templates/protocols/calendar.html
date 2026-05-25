@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Календарь соревнований{% endblock %}
+
+{% block extra_css %}
+<style>
+    .year-nav { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+    .months-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+        gap: 1.25rem;
+    }
+    .month-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1rem 1rem 0.75rem 1rem;
+    }
+    .month-title {
+        font-weight: 700;
+        font-size: 1rem;
+        color: var(--accent);
+        margin: 0 0 0.75rem 0;
+    }
+    .cal-table { width: 100%; border-collapse: collapse; }
+    .cal-table th {
+        text-align: center;
+        padding: 3px 2px;
+        font-size: 0.72rem;
+        color: var(--muted);
+        border-bottom: none;
+        font-weight: 600;
+    }
+    .cal-table td {
+        text-align: center;
+        padding: 3px 2px;
+        border-bottom: none;
+        width: 14.28%;
+        line-height: 1;
+    }
+    .day-empty { color: transparent; user-select: none; display: inline-block; width: 26px; height: 26px; }
+    .day-normal { color: var(--muted); font-size: 0.85rem; display: inline-block; width: 26px; height: 26px; line-height: 26px; }
+    .day-event {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        background: var(--accent);
+        color: var(--bg);
+        border-radius: 50%;
+        font-weight: 700;
+        font-size: 0.85rem;
+        cursor: default;
+    }
+    .event-list {
+        margin-top: 0.75rem;
+        border-top: 1px solid rgba(255,255,255,0.08);
+        padding-top: 0.6rem;
+    }
+    .event-item {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.4rem;
+        align-items: baseline;
+        font-size: 0.82rem;
+    }
+    .event-day { color: var(--accent); font-weight: 700; min-width: 1.8rem; }
+    .event-link { color: var(--text); text-decoration: none; }
+    .event-link:hover { color: var(--accent); }
+    .no-events { color: var(--muted); font-size: 0.9rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Календарь соревнований</h2>
+
+    {% if not available_years %}
+        <p class="no-events">Нет протоколов с датами соревнований. Укажите дату соревнований в каждом протоколе.</p>
+    {% else %}
+        <div class="year-nav">
+            {% for y in available_years %}
+                <a href="?year={{ y }}" class="btn{% if y != selected_year %} btn-secondary{% endif %}">{{ y }}</a>
+            {% endfor %}
+        </div>
+
+        {% with has_any=False %}
+        {% for month in months %}{% if month.has_events %}{% with has_any=True %}{% endwith %}{% endif %}{% endfor %}
+        {% endwith %}
+
+        <div class="months-grid">
+        {% for month in months %}
+        {% if month.has_events %}
+        <div class="month-card">
+            <div class="month-title">{{ month.month_name }}</div>
+            <table class="cal-table">
+                <tr>
+                    <th>Пн</th><th>Вт</th><th>Ср</th><th>Чт</th><th>Пт</th><th>Сб</th><th>Вс</th>
+                </tr>
+                {% for week in month.weeks %}
+                <tr>
+                    {% for day in week %}
+                    <td>
+                        {% if day.day == 0 %}
+                            <span class="day-empty">&nbsp;</span>
+                        {% elif day.has_events %}
+                            <span class="day-event" title="{% for p in day.protocols %}{{ p.title }}{% if not forloop.last %} | {% endif %}{% endfor %}">{{ day.day }}</span>
+                        {% else %}
+                            <span class="day-normal">{{ day.day }}</span>
+                        {% endif %}
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </table>
+            <div class="event-list">
+                {% for day_num, protos in month.events_list %}
+                    {% for p in protos %}
+                    <div class="event-item">
+                        <span class="event-day">{{ day_num }}</span>
+                        <a class="event-link" href="{% url 'protocols:protocol_detail' p.pk %}">{{ p.title|truncatechars:48 }}</a>
+                    </div>
+                    {% endfor %}
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+        </div>
+
+        {% comment %}Если в выбранном году нет ни одного месяца с событиями{% endcomment %}
+        {% with found=False %}
+        {% for month in months %}{% if month.has_events %}{% with found=True %}{% endwith %}{% endif %}{% endfor %}
+        {% endwith %}
+    {% endif %}
+</div>
+{% endblock %}

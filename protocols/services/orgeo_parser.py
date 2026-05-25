@@ -137,6 +137,21 @@ def _count_participants(rows_html: List[str]) -> int:
     return count
 
 
+def _get_place(cells: List[str]) -> str:
+    """
+    Определяет место участника из строки таблицы.
+    Orgeo имеет два формата:
+      А) с колонкой «Место» в cells[6] (явное место, число)
+      Б) без колонки «Место» — место = cells[0] (П/п в отсортированном списке)
+    Формат определяется по тому, является ли cells[6] числом.
+    """
+    if len(cells) > 6:
+        explicit = cells[6].strip()
+        if explicit.isdigit():
+            return explicit
+    return cells[0].strip() if cells else ''
+
+
 def _find_leader_time(rows_html: List[str]) -> Optional[int]:
     """
     Находит время лидера (1 место) в группе.
@@ -144,14 +159,217 @@ def _find_leader_time(rows_html: List[str]) -> Optional[int]:
     """
     for row in rows_html:
         cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
-        if len(cells) < 7:
+        if len(cells) < 5:
             continue
-        place = _strip_tags(cells[6]).strip()
+        cells_text = [_strip_tags(c) for c in cells]
+        place = _get_place(cells_text)
         if place == '1':
-            result_str = _strip_tags(cells[4]).strip()
+            result_str = cells_text[4].strip()
             return _seconds_from_time(result_str)
     return None
 
+
+# ── Эстафета ─────────────────────────────────────────────────────────────────
+
+# Имена-заглушки для «пустых» ног эстафеты (команда не заявила бегуна на этап).
+_RELAY_NO_RUNNER = frozenset({'нет', '-', '—', 'нет/нет', 'dns', 'dsq'})
+
+
+def _is_relay_group(data_rows: List[str]) -> bool:
+    """
+    Возвращает True, если таблица — эстафета.
+    Признак: две подряд непустые строки с одинаковым цифровым значением в cells[0].
+    В индивидуальных стартах cells[0] = П/п (последовательный, всегда разный).
+    В эстафете cells[0] = место команды (одинаковое для всех ног одной команды).
+    """
+    prev_place = None
+    for row in data_rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
+        if not cells:
+            prev_place = None
+            continue
+        cells_text = [_strip_tags(c).strip() for c in cells]
+        if not any(cells_text):
+            prev_place = None
+            continue
+        place = cells_text[0]
+        if place and place.isdigit() and place == prev_place:
+            return True
+        prev_place = place
+    return False
+
+
+def _split_relay_blocks(data_rows: List[str]) -> List[List[str]]:
+    """Разбивает строки эстафетной таблицы на блоки — по одному на команду."""
+    blocks: List[List[str]] = []
+    current: List[str] = []
+    for row in data_rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
+        has_data = bool(cells and any(_strip_tags(c).strip() for c in cells))
+        if has_data:
+            current.append(row)
+        else:
+            if current:
+                blocks.append(current)
+                current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _parse_relay_team_block(block_rows: List[str]) -> dict:
+    """
+    Парсит блок строк одной команды эстафеты.
+    Возвращает: {place, relay_team_name, members, total_time_sec}.
+    members — список (last_name, first_name, member_club).
+    total_time_sec — время последнего этапа (накопленное итоговое время команды).
+    """
+    place = ''
+    relay_team_name = ''
+    members: List[Tuple[str, str, str]] = []  # (ln, fn, club)
+
+    for row in block_rows:
+        cells_html = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
+        if len(cells_html) < 3:
+            continue
+        cells = [_strip_tags(c).strip() for c in cells_html]
+
+        # Место команды — cells[0], одинаково для всех ног
+        if not place and cells[0].isdigit():
+            place = cells[0]
+
+        # ФИ бегуна — cells[2], клуб бегуна — cells[3]
+        full_name = cells[2] if len(cells) > 2 else ''
+        member_club = cells[3] if len(cells) > 3 else ''
+        if full_name and full_name.lower().strip() not in _RELAY_NO_RUNNER:
+            ln, fn = _split_name(full_name)
+            if ln.strip():
+                members.append((ln.strip(), fn.strip(), member_club.strip()))
+
+        # Название эстафетной команды — cells[3] первой строки
+        if not relay_team_name and len(cells) > 3 and cells[3]:
+            relay_team_name = cells[3]
+
+    # Итоговое время = время в cells[4] последней строки блока
+    total_time_sec: Optional[int] = None
+    last_cells_html = re.findall(
+        r'<td[^>]*>(.*?)</td>', block_rows[-1], re.IGNORECASE | re.DOTALL
+    )
+    if len(last_cells_html) >= 5:
+        last_cells = [_strip_tags(c).strip() for c in last_cells_html]
+        t_str = last_cells[4]
+        if t_str and not _is_disqualified(t_str):
+            total_time_sec = _seconds_from_time(t_str)
+
+    return {
+        'place': place,
+        'relay_team_name': relay_team_name,
+        'members': members,
+        'total_time_sec': total_time_sec,
+    }
+
+
+def parse_orgeo_relay(
+    html: str,
+    base_pairs: List[Tuple[str, str]],
+    team_name: str = '',
+) -> List[Dict]:
+    """
+    Парсит HTML страницы ЭСТАФЕТНОЙ группы Orgeo.
+
+    Все участники одной команды получают одинаковые очки, вычисленные по
+    итоговому времени команды (время последнего этапа).
+
+    Фильтрация:
+      1) team_name задан → включаем команды, у которых team_name входит в название
+         эстафетной команды ИЛИ хотя бы один участник в base_pairs;
+      2) только base_pairs → хотя бы один участник команды в базе;
+      3) оба пусты → все команды.
+    """
+    results: List[Dict] = []
+    known = {
+        (str(ln).strip().lower(), str(fn).strip().lower())
+        for ln, fn in base_pairs
+    }
+    team_name_lower = (team_name or '').strip().lower()
+    group_name = _extract_group_from_h2(html)
+
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.IGNORECASE | re.DOTALL)
+    if not rows:
+        return results
+
+    blocks = _split_relay_blocks(rows[1:])  # rows[0] = заголовок таблицы
+    if not blocks:
+        return results
+
+    teams = [_parse_relay_team_block(b) for b in blocks]
+
+    # Время лидера — команда с place='1' и валидным итоговым временем
+    leader_time_sec: Optional[int] = None
+    for team in teams:
+        if team['place'] == '1' and team['total_time_sec']:
+            leader_time_sec = team['total_time_sec']
+            break
+
+    num_teams = len(teams)
+
+    for team in teams:
+        members = team['members']  # [(ln, fn, club), ...]
+        if not members:
+            continue
+        relay_team = team['relay_team_name']
+
+        # Фильтрация — всегда по-участниково:
+        # участник попадает в результаты, если его клуб (cells[3]) совпадает
+        # с team_name ИЛИ он есть в базе known.
+        if team_name_lower:
+            filtered = [
+                (ln, fn) for ln, fn, club in members
+                if team_name_lower in club.lower()
+                or (ln.lower(), fn.lower()) in known
+            ]
+        elif known:
+            filtered = [
+                (ln, fn) for ln, fn, _club in members
+                if (ln.lower(), fn.lower()) in known
+            ]
+        else:
+            filtered = [(ln, fn) for ln, fn, _club in members]
+
+        if not filtered:
+            continue
+
+        # Очки команды
+        place = team['place']
+        total_time = team['total_time_sec']
+        if not place or not total_time or not leader_time_sec:
+            points = 0
+        elif place == '1':
+            points = 1000
+        else:
+            points = _calc_points(total_time, leader_time_sec)
+
+        place_display = place if place else '-'
+
+        for last_name, first_name in filtered:
+            raw_line = (
+                f"{place_display} из {num_teams} (эстафета), "
+                f"{last_name} {first_name}, очки:{points}"
+            )
+            results.append({
+                'group_name': group_name,
+                'place': place_display,
+                'place_out_of': num_teams,
+                'last_name': last_name,
+                'first_name': first_name,
+                'points': points,
+                'raw_line': raw_line,
+            })
+
+    return results
+
+
+# ── Индивидуальный старт ──────────────────────────────────────────────────────
 
 def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '') -> List[Dict]:
     """
@@ -184,6 +402,10 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
 
     # Первая строка — заголовки (П/п, №, ...), пропускаем
     data_rows = rows[1:]
+
+    # ── Автодетект эстафеты: если несколько подряд непустых строк — это эстафета ──
+    if _is_relay_group(data_rows):
+        return parse_orgeo_relay(html, base_pairs, team_name)
 
     # ── Считаем кол-во участников в группе ──
     group_size = _count_participants(data_rows)
@@ -220,7 +442,8 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
                 continue
 
         result_str = cells[4].strip() if len(cells) > 4 else ''
-        place_col = cells[6].strip() if len(cells) > 6 else ''
+        # Место: Format A — явная колонка cells[6], Format B — П/п cells[0]
+        place_col = _get_place(cells)
 
         # ── Определяем статус ──
         disqualified = _is_disqualified(result_str)

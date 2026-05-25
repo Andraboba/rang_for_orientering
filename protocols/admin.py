@@ -49,22 +49,22 @@ class ProtocolAdmin(admin.ModelAdmin):
 
 @admin.register(ProtocolResult)
 class ProtocolResultAdmin(admin.ModelAdmin):
-    list_display = ('protocol', 'place', 'place_out_of', 'last_name', 'first_name', 'rank', 'points')
+    list_display = ('protocol', 'group_name', 'place', 'place_out_of', 'last_name', 'first_name', 'rank', 'points')
     list_filter = ('protocol',)
     search_fields = ('last_name', 'first_name', 'rank')
 
 
 @admin.register(KnownParticipant)
 class KnownParticipantAdmin(admin.ModelAdmin):
-    list_display = ('last_name', 'first_name', 'veteran')
+    list_display = ('last_name', 'first_name', 'group_name', 'veteran')
     list_filter = ('veteran',)
-    list_editable = ('veteran',)
-    search_fields = ('last_name', 'first_name')
+    list_editable = ('group_name', 'veteran')
+    search_fields = ('last_name', 'first_name', 'group_name')
     actions = ['mark_as_veteran', 'unmark_veteran']
 
     fieldsets = (
         (None, {
-            'fields': ('last_name', 'first_name'),
+            'fields': ('last_name', 'first_name', 'group_name'),
         }),
         ('Ветеран / Сезонный зачёт', {
             'fields': ('veteran',),

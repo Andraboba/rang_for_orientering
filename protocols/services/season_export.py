@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Экспорт за сезон в Excel: две таблицы.
-1) Места: первая строка — названия стартов, далее строки — участник и его места (по алфавиту).
-2) Баллы: первая строка — заголовок, далее — участник и баллы (от лучшего к худшему).
+Экспорт за сезон в Excel: четыре листа.
+1) Места              — обычные участники (не ветераны), места по стартам.
+2) Баллы              — итоговые очки обычных участников.
+3) Ветераны — Места   — то же для ветеранов.
+4) Ветераны — Баллы   — итоговые очки ветеранов.
 """
+import re
 from collections import defaultdict
 from io import BytesIO
 
@@ -24,42 +27,50 @@ GROUP_SPLIT_EXCEPTIONS = {
 }
 
 
+def _normalize_group_name(name: str) -> str:
+    """
+    Нормализует название группы: убирает дефис между буквой и цифрой.
+    М-12 → М12, Ж-14 → Ж14, М-45+ → М45+ и т.д.
+    """
+    return re.sub(r'([А-Яа-яA-Za-z])-(\d)', r'\1\2', (name or '').strip())
+
+
 def _build_name_disambiguation(protocol_ids):
     """
     Определяет, нужно ли разделять участников по группам.
-    Разделение применяется только к ФИО из GROUP_SPLIT_EXCEPTIONS
-    и только если человек встречается в нескольких группах.
+    Разделение всегда применяется к ФИО из GROUP_SPLIT_EXCEPTIONS.
+    Группы нормализуются: М-12 и М12 считаются одной группой.
     """
     if not protocol_ids:
         return {}
     rows = (
-        ProtocolResult.objects.filter(protocol_id__in=protocol_ids)
+        ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .values('last_name', 'first_name', 'group_name')
     )
     groups_by_name = defaultdict(set)
     for r in rows:
         key = (r['last_name'], r['first_name'])
-        group_name = (r.get('group_name') or '').strip()
+        group_name = _normalize_group_name(r.get('group_name') or '')
         if group_name:
             groups_by_name[key].add(group_name)
     split_flags = {}
     for key, groups in groups_by_name.items():
         ln, fn = key
         normalized = ((ln or '').strip().lower(), (fn or '').strip().lower())
-        split_flags[key] = normalized in GROUP_SPLIT_EXCEPTIONS and len(groups) > 1
+        split_flags[key] = normalized in GROUP_SPLIT_EXCEPTIONS
     return split_flags
 
 
 def _display_person_name(last_name, first_name, group_name, need_split):
     """Формирует отображаемое имя участника с учётом разбиения по группе."""
     if need_split:
-        group_suffix = (group_name or '').strip() or 'без группы'
+        group_suffix = _normalize_group_name(group_name) or 'без группы'
         return last_name, f'{first_name} ({group_suffix})'
     return last_name, first_name
 
 
 def _veteran_name_pairs():
-    """Пары (фамилия, имя) в нижнем регистре для участников с флагом «Ветеран» (не в зачёт сезона)."""
+    """Пары (фамилия, имя) в нижнем регистре для участников с флагом «Ветеран»."""
     return set(
         (ln.strip().lower(), fn.strip().lower())
         for ln, fn in KnownParticipant.objects.filter(veteran=True).values_list('last_name', 'first_name')
@@ -106,10 +117,11 @@ def get_protocols_for_date_range(date_from, date_to):
     ).order_by('_eff_date', 'pk')
 
 
-def build_places_data(protocols):
+def build_places_data(protocols, veterans_only=False):
     """
     Строит данные для таблицы «места»: по каждому протоколу у участника — (место, участников в группе, разряд).
-    Ветераны не включаются.
+    veterans_only=False → только обычные участники (не ветераны).
+    veterans_only=True  → только ветераны.
     Возвращает:
       - people_sorted: список участников
       - data: {(last_name, first_name): {(protocol_id, start_idx): (place, out_of, rank)}}
@@ -120,61 +132,65 @@ def build_places_data(protocols):
     protocol_by_id = {p.id: p for p in protocols}
     split_by_group = _build_name_disambiguation(protocol_ids)
     results = (
-        ProtocolResult.objects.filter(protocol_id__in=protocol_ids)
+        ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .order_by('protocol_id', 'id')
         .values('protocol_id', 'last_name', 'first_name', 'group_name', 'place', 'place_out_of', 'rank')
     )
     people_set = set()
     by_person = defaultdict(dict)
-    person_start_counters = defaultdict(lambda: defaultdict(int))
-    max_starts_per_protocol = defaultdict(int)
+    seen_key_pid = set()
     for r in results:
         ln, fn = r['last_name'], r['first_name']
-        if (ln.strip().lower(), fn.strip().lower()) in veteran_set:
+        is_veteran = (ln.strip().lower(), fn.strip().lower()) in veteran_set
+        if veterans_only and not is_veteran:
+            continue
+        if not veterans_only and is_veteran:
             continue
         need_split = split_by_group.get((ln, fn), False)
         key = _display_person_name(ln, fn, r.get('group_name'), need_split)
         people_set.add(key)
         pid = r['protocol_id']
-        person_start_counters[key][pid] += 1
-        start_idx = person_start_counters[key][pid]
-        if start_idx > max_starts_per_protocol[pid]:
-            max_starts_per_protocol[pid] = start_idx
+        if (key, pid) in seen_key_pid:
+            continue
+        seen_key_pid.add((key, pid))
         place = r['place'] or ''
         place_out_of = r['place_out_of']
         place_out_of_str = str(place_out_of) if place_out_of is not None else ''
         rank = (r['rank'] or '').strip()
-        by_person[key][(pid, start_idx)] = (place, place_out_of_str, rank)
+        by_person[key][(pid, 1)] = (place, place_out_of_str, rank)
     people_sorted = sorted(people_set, key=lambda x: (x[0].lower(), x[1].lower()))
-    start_columns = []
-    for p in protocols:
-        max_starts = max_starts_per_protocol.get(p.id, 0)
-        for start_idx in range(1, max_starts + 1):
-            start_columns.append((protocol_by_id[p.id], start_idx))
+    start_columns = [(protocol_by_id[p.id], 1) for p in protocols]
     return people_sorted, dict(by_person), start_columns
 
 
-def build_points_data(ranking):
+def build_points_data(ranking, veterans_only=False):
     """
     Участники рейтинга сезона с баллами из SeasonRankingEntry (от лучшего к худшему).
-    Ветераны (veteran=True) не включаются в зачёт.
+    veterans_only=False → только не-ветераны.
+    veterans_only=True  → только ветераны.
     """
-    entries = (
+    qs = (
         SeasonRankingEntry.objects.filter(ranking=ranking)
-        .exclude(participant__veteran=True)
         .select_related('participant')
         .order_by('-points', 'participant__last_name', 'participant__first_name')
     )
+    if veterans_only:
+        qs = qs.filter(participant__veteran=True)
+    else:
+        qs = qs.exclude(participant__veteran=True)
     return [
         (e.participant.last_name, e.participant.first_name, e.points)
-        for e in entries
+        for e in qs
     ]
 
 
-def build_points_data_from_protocols(protocols):
+def build_points_data_from_protocols(protocols, max_starts=None, veterans_only=False):
     """
     Сумма очков по результатам протоколов за период: по каждому участнику
-    суммируем (ProtocolResult.points × коэффициент старта). Ветераны не включаются.
+    суммируем (ProtocolResult.points × коэффициент старта).
+    veterans_only=False → только не-ветераны.
+    veterans_only=True  → только ветераны.
+    Если max_starts задан — берём только лучшие N стартов каждого участника.
     Возвращает: list of (last_name, first_name, total_points)
     """
     if not protocols:
@@ -184,17 +200,29 @@ def build_points_data_from_protocols(protocols):
     protocol_ids = [p.id for p in protocols]
     split_by_group = _build_name_disambiguation(protocol_ids)
     rows = (
-        ProtocolResult.objects.filter(protocol_id__in=protocol_ids)
+        ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .select_related('protocol', 'protocol__championship_level')
     )
-    totals = defaultdict(float)
+    # per_start[person_key][protocol_id] = суммарные взвешенные очки за старт
+    per_start = defaultdict(lambda: defaultdict(float))
     for r in rows:
         ln, fn = r.last_name, r.first_name
-        if (ln.strip().lower(), fn.strip().lower()) in veteran_set:
+        is_veteran = (ln.strip().lower(), fn.strip().lower()) in veteran_set
+        if veterans_only and not is_veteran:
+            continue
+        if not veterans_only and is_veteran:
             continue
         need_split = split_by_group.get((ln, fn), False)
         person_key = _display_person_name(ln, fn, r.group_name, need_split)
-        totals[person_key] += float(r.weighted_points)
+        per_start[person_key][r.protocol_id] += float(r.weighted_points)
+
+    totals = {}
+    for person_key, starts in per_start.items():
+        points_list = sorted(starts.values(), reverse=True)
+        if max_starts is not None:
+            points_list = points_list[:max_starts]
+        totals[person_key] = sum(points_list)
+
     return [
         (last_name, first_name, total)
         for (last_name, first_name), total in sorted(
@@ -204,9 +232,15 @@ def build_points_data_from_protocols(protocols):
     ]
 
 
+def _protocol_display_title(p):
+    """Название протокола для заголовка таблицы (очищенное)."""
+    from .title_cleaner import clean_protocol_title
+    raw = p.title or (p.event.title if p.event else '')
+    return clean_protocol_title(raw) or f'Протокол {p.pk}'
+
+
 def _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map):
     """Пишет лист «Места»: на каждый старт по 3 колонки — место, участников в группе, разряд."""
-    # Заголовок: Участник | для каждого протокола: место, участников, разряд
     header = ['Участник']
     starts_per_protocol = defaultdict(int)
     for p, _start_idx in start_columns:
@@ -239,34 +273,48 @@ def _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, p
             col += 1
 
 
+def _write_points_sheet(ws, points_list, label='Баллы'):
+    """Пишет лист «Баллы»: участник → итоговые очки (от лучшего к худшему)."""
+    ws.append(['Участник', label])
+    for col in (1, 2):
+        cell = ws.cell(row=1, column=col)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+    for last_name, first_name, points in points_list:
+        ws.append([f'{last_name} {first_name}', round(float(points), 2)])
+    ws.column_dimensions['A'].width = 25
+    ws.column_dimensions['B'].width = 22
+
+
 def export_season_excel(ranking):
     """
-    Формирует один Excel-файл с двумя листами:
-    - «Места»: на каждый старт 3 колонки (место, участников в группе, разряд); участники по алфавиту.
-    - «Баллы»: участник и баллы (от лучшего к худшему).
+    Excel с четырьмя листами: «Места», «Баллы», «Ветераны — Места», «Ветераны — Баллы».
     Период рейтинга: по date_from/date_to или по year+season.
     """
     protocols = list(get_protocols_for_ranking(ranking))
-    protocol_ids = [p.id for p in protocols]
 
     wb = Workbook()
+
     ws_places = wb.active
     ws_places.title = 'Места'
     people_sorted, place_map, start_columns = build_places_data(protocols)
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
-    # --- Лист 2: Баллы --- (из результатов протоколов за период: сумма очков по стартам)
     ws_points = wb.create_sheet('Баллы', 1)
-    ws_points.append(['Участник', 'Баллы'])
-    for col in (1, 2):
-        cell = ws_points.cell(row=1, column=col)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal='center')
-    points_list = build_points_data(ranking) or build_points_data_from_protocols(protocols)
-    for last_name, first_name, points in points_list:
-        ws_points.append([f'{last_name} {first_name}', points])
-    ws_points.column_dimensions['A'].width = 25
-    ws_points.column_dimensions['B'].width = 12
+    _write_points_sheet(
+        ws_points,
+        build_points_data(ranking) or build_points_data_from_protocols(protocols),
+    )
+
+    ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
+    vet_people, vet_place_map, _ = build_places_data(protocols, veterans_only=True)
+    _write_places_sheet_three_columns(ws_vet_places, start_columns, vet_people, vet_place_map)
+
+    ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
+    _write_points_sheet(
+        ws_vet_points,
+        build_points_data(ranking, veterans_only=True) or build_points_data_from_protocols(protocols, veterans_only=True),
+    )
 
     buf = BytesIO()
     wb.save(buf)
@@ -276,30 +324,35 @@ def export_season_excel(ranking):
 
 def export_season_excel_by_period(year, season):
     """
-    Экспорт по году и сезону без привязки к конкретному SeasonRanking.
-    Таблица «Места» строится по протоколам периода.
-    Таблица «Баллы» — по записям SeasonRanking для этого года и сезона (если есть).
+    Экспорт по году и сезону.
+    Четыре листа: «Места», «Баллы», «Ветераны — Места», «Ветераны — Баллы».
     """
     ranking = SeasonRanking.objects.filter(year=year, season=season).first()
     protocols = list(get_protocols_for_period(year, season))
+
     wb = Workbook()
+
     ws_places = wb.active
     ws_places.title = 'Места'
     people_sorted, place_map, start_columns = build_places_data(protocols)
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
-    # --- Лист 2: Баллы --- (сумма очков по протоколам периода; при наличии рейтинга — его записи)
     ws_points = wb.create_sheet('Баллы', 1)
-    ws_points.append(['Участник', 'Баллы'])
-    for col in (1, 2):
-        cell = ws_points.cell(row=1, column=col)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal='center')
-    points_list = (build_points_data(ranking) if ranking else []) or build_points_data_from_protocols(protocols)
-    for last_name, first_name, points in points_list:
-        ws_points.append([f'{last_name} {first_name}', points])
-    ws_points.column_dimensions['A'].width = 25
-    ws_points.column_dimensions['B'].width = 12
+    _write_points_sheet(
+        ws_points,
+        (build_points_data(ranking) if ranking else []) or build_points_data_from_protocols(protocols),
+    )
+
+    ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
+    vet_people, vet_place_map, _ = build_places_data(protocols, veterans_only=True)
+    _write_places_sheet_three_columns(ws_vet_places, start_columns, vet_people, vet_place_map)
+
+    ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
+    _write_points_sheet(
+        ws_vet_points,
+        (build_points_data(ranking, veterans_only=True) if ranking else [])
+        or build_points_data_from_protocols(protocols, veterans_only=True),
+    )
 
     buf = BytesIO()
     wb.save(buf)
@@ -307,34 +360,47 @@ def export_season_excel_by_period(year, season):
     return buf.getvalue()
 
 
-def _protocol_display_title(p):
-    """Название протокола для заголовка таблицы (очищенное)."""
-    from .title_cleaner import clean_protocol_title
-    raw = p.title or (p.event.title if p.event else '')
-    return clean_protocol_title(raw) or f'Протокол {p.pk}'
-
-
-def export_season_excel_by_date_range(date_from, date_to):
+def export_season_excel_by_date_range(date_from, date_to, max_starts=None):
     """
-    Экспорт за выбранный период (календарь): лист «Места» — по 3 колонки на старт (место, участников, разряд).
+    Экспорт за выбранный период (из формы «Экспорт за период»).
+    Четыре листа: «Места», «Баллы», «Ветераны — Места», «Ветераны — Баллы».
+    Если max_starts задан — в зачёт идут только лучшие N стартов каждого участника.
     """
     protocols = list(get_protocols_for_date_range(date_from, date_to))
+    points_label = (
+        f'Баллы (лучшие {max_starts} из {len(protocols)} стартов)'
+        if max_starts and max_starts < len(protocols)
+        else 'Баллы'
+    )
+
     wb = Workbook()
+
+    # ── Лист 1: Места ──
     ws_places = wb.active
     ws_places.title = 'Места'
     people_sorted, place_map, start_columns = build_places_data(protocols)
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
+    # ── Лист 2: Баллы ──
     ws_points = wb.create_sheet('Баллы', 1)
-    ws_points.append(['Участник', 'Баллы'])
-    for col in (1, 2):
-        cell = ws_points.cell(row=1, column=col)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal='center')
-    for last_name, first_name, points in build_points_data_from_protocols(protocols):
-        ws_points.append([f'{last_name} {first_name}', points])
-    ws_points.column_dimensions['A'].width = 25
-    ws_points.column_dimensions['B'].width = 12
+    _write_points_sheet(
+        ws_points,
+        build_points_data_from_protocols(protocols, max_starts=max_starts),
+        label=points_label,
+    )
+
+    # ── Лист 3: Ветераны — Места ──
+    ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
+    vet_people, vet_place_map, _ = build_places_data(protocols, veterans_only=True)
+    _write_places_sheet_three_columns(ws_vet_places, start_columns, vet_people, vet_place_map)
+
+    # ── Лист 4: Ветераны — Баллы ──
+    ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
+    _write_points_sheet(
+        ws_vet_points,
+        build_points_data_from_protocols(protocols, max_starts=max_starts, veterans_only=True),
+        label=points_label,
+    )
 
     buf = BytesIO()
     wb.save(buf)
