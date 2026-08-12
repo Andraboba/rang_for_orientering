@@ -63,6 +63,13 @@ class HelperTests(SimpleTestCase):
         self.assertEqual(_calc_points(150, 100), 500)
         self.assertEqual(_calc_points(100, 0), 0)
 
+    def test_zero_time_is_not_a_result(self):
+        """«00:00:00» у не стартовавших не должно превращаться в 2000 очков."""
+        self.assertEqual(_calc_points(0, 100), 0)
+
+    def test_points_never_exceed_1000(self):
+        self.assertEqual(_calc_points(50, 100), 1000)
+
     def test_normalize_status_dnf(self):
         self.assertEqual(_normalize_status(['1', 'Иванов', 'DNF']), 'снят')
 

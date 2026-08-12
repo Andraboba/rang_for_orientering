@@ -68,6 +68,12 @@ class HelperTests(SimpleTestCase):
         self.assertEqual(_calc_points(200, 100), 1)  # min 1
         self.assertEqual(_calc_points(100, 0), 0)
 
+    def test_zero_time_is_not_a_result(self):
+        self.assertEqual(_calc_points(0, 100), 0)
+
+    def test_points_never_exceed_1000(self):
+        self.assertEqual(_calc_points(50, 100), 1000)
+
 
 ORGEO_HTML_TEMPLATE = """
 <html>
@@ -113,6 +119,15 @@ class ParseOrgeoTests(SimpleTestCase):
 
     def test_parse_no_filter_returns_all(self):
         r = parse_orgeo(ORGEO_HTML_TEMPLATE, base_pairs=[], team_name='')
+        self.assertEqual(len(r), 3)
+
+    def test_star_shows_everyone_despite_known_base(self):
+        """'*' — общий для всех парсеров способ показать всех участников."""
+        r = parse_orgeo(
+            ORGEO_HTML_TEMPLATE,
+            base_pairs=[('Иванов', 'Иван')],
+            team_name='*',
+        )
         self.assertEqual(len(r), 3)
 
     def test_parse_disqualified_gets_zero_points(self):

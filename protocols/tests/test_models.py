@@ -10,10 +10,12 @@ from protocols.models import (
     Event,
     KnownParticipant,
     Protocol,
+    ProtocolGroupLevel,
     ProtocolResult,
     SeasonRanking,
     SeasonRankingEntry,
 )
+from protocols.services.season_export import build_points_data_from_protocols
 from .factories import (
     make_championship_level,
     make_event,
@@ -145,6 +147,62 @@ class ProtocolResultTests(TestCase):
         # Ветка когда protocol_id is None
         r = ProtocolResult(last_name='X', first_name='Y', points=123)
         self.assertEqual(r.weighted_points, 123.0)
+
+
+class GroupLevelOverrideTests(TestCase):
+    """
+    Статус старта может зависеть от группы: в Зеленограде первенство России
+    было только у МЖ14 и МЖ16, остальные группы бежали всероссийские.
+    """
+
+    def setUp(self):
+        self.russia = make_championship_level(name='Первенство России', coefficient=1.5)
+        self.russian_cup = make_championship_level(name='Всероссийские', coefficient=1.25)
+        self.protocol = make_protocol(championship_level=self.russian_cup)
+        ProtocolGroupLevel.objects.create(
+            protocol=self.protocol,
+            group_name='Юноши до 15 лет',
+            championship_level=self.russia,
+        )
+
+    def test_group_with_override_uses_its_level(self):
+        self.assertEqual(
+            self.protocol.coefficient_for_group('Юноши до 15 лет'), 1.5
+        )
+
+    def test_group_name_is_case_insensitive(self):
+        self.assertEqual(
+            self.protocol.coefficient_for_group('юноши до 15 ЛЕТ'), 1.5
+        )
+
+    def test_other_groups_use_protocol_level(self):
+        self.assertEqual(self.protocol.coefficient_for_group('Ж21'), 1.25)
+        self.assertEqual(self.protocol.coefficient_for_group(''), 1.25)
+
+    def test_weighted_points_differ_by_group(self):
+        junior = make_result(
+            self.protocol, group_name='Юноши до 15 лет', points=1000
+        )
+        adult = make_result(self.protocol, group_name='Ж21', points=1000)
+        self.assertEqual(junior.weighted_points, 1500.0)
+        self.assertEqual(adult.weighted_points, 1250.0)
+
+    def test_protocol_without_overrides_is_unaffected(self):
+        plain = make_protocol(championship_level=self.russian_cup)
+        self.assertEqual(plain.coefficient_for_group('Юноши до 15 лет'), 1.25)
+
+    def test_season_points_use_group_coefficient(self):
+        make_result(self.protocol, group_name='Юноши до 15 лет',
+                    last_name='Юнош', first_name='Иван', points=1000)
+        make_result(self.protocol, group_name='Ж21',
+                    last_name='Взрослая', first_name='Анна', points=1000)
+        rows = dict(
+            (last_name, points)
+            for last_name, _first_name, points in
+            build_points_data_from_protocols([self.protocol])
+        )
+        self.assertEqual(rows['Юнош'], 1500.0)
+        self.assertEqual(rows['Взрослая'], 1250.0)
 
 
 class SeasonRankingTests(TestCase):

@@ -14,7 +14,25 @@
       "PowerShell(cmd /c \"dir /b \"\"C:\\\\Program Files\\\\Tesseract-OCR\\\\\"\"\")",
       "PowerShell(cmd /c \"dir /b \"\"C:\\\\Program Files\\\\Tesseract-OCR\\\\tessdata\\\\\"\"\")",
       "Bash(python *)",
-      "Bash(curl -s \"http://127.0.0.1:8000/protocol/67/pdf-ocr-text/\")"
+      "Bash(curl -s \"http://127.0.0.1:8000/protocol/67/pdf-ocr-text/\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\andre\\\\PycharmProjects\\\\DjangoProject\" -Exclude \".venv\" -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\andre\\\\PycharmProjects\\\\DjangoProject\" -Recurse -Directory)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\andre\\\\PycharmProjects\\\\DjangoProject\" -Recurse | Where-Object { $_.PSIsContainer } | Select-Object -ExpandProperty FullName)",
+      "Bash(./.venv/Scripts/python.exe manage.py check)",
+      "Bash(./.venv/Scripts/python.exe manage.py showmigrations protocols)",
+      "Bash(./.venv/Scripts/python.exe manage.py runserver 8000 --noreload)",
+      "Bash(grep -n \"def \\\\|orgeo.ru\\\\|/live\\\\|/event\\\\|#/\\\\|api\" protocols/services/orgeo_browser.py)",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/andre/AppData/Local/Temp/claude/C--Users-andre-PycharmProjects-DjangoProject/3456546d-6f8f-4569-ab70-92fd3f5b80ed/scratchpad/probe.py\")",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/andre/AppData/Local/Temp/claude/C--Users-andre-PycharmProjects-DjangoProject/3456546d-6f8f-4569-ab70-92fd3f5b80ed/scratchpad/probe2.py\")",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://o-club.ru/wp-content/uploads/2026/08/20260731_results.html?sportorg=1\" -o sportorg.html)",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://o-site.spb.ru/_races/260616-21_KKP/kkp5sum.pdf\" -o kkp5sum.pdf)",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://o-club.ru/wp-content/uploads/2026/08/2026.08.02_sum_30_31_01_02.pdf\" -o oclub_sum.pdf)",
+      "Bash(C:/Users/andre/PycharmProjects/DjangoProject/.venv/Scripts/python.exe -c ' *)",
+      "Bash(timeout 180 C:/Users/andre/PycharmProjects/DjangoProject/.venv/Scripts/python.exe -c ' *)",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://o-club.ru/wp-content/uploads/2026/08/20260731_results_est.html?sportorg=1\" -o sportorg_est.html)"
     ]
   }
 }

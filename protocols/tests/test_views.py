@@ -8,6 +8,11 @@ from django.test import TestCase
 from django.urls import reverse
 
 from protocols.models import Event, KnownParticipant, Protocol, ProtocolResult
+from protocols.services.pdf_summary_parser import PDF_SUMMARY_PREFIX
+from protocols.services.source_router import KIND_PDF_SUMMARY, KIND_SPORTORG
+from protocols.services.sportorg_parser import SPORTORG_DATA_PREFIX, extract_race_b64
+from .test_pdf_summary_parser import OCLUB_POINTS_TEXT
+from .test_sportorg_parser import _personal_race, _race_html
 from .factories import (
     make_championship_level,
     make_event,
@@ -40,7 +45,7 @@ class HomeViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(Protocol.objects.filter(title='OK').exists())
 
-    @patch('protocols.views.fetch_url')
+    @patch('protocols.services.source_router.fetch_url')
     def test_post_generic_url(self, mock_fetch):
         mock_fetch.return_value = (
             '<html><h1>Тестовые соревнования</h1></html>', None
@@ -58,7 +63,7 @@ class HomeViewTests(TestCase):
         p = Protocol.objects.first()
         self.assertIn('Тестовые', p.title)
 
-    @patch('protocols.views.fetch_url')
+    @patch('protocols.services.source_router.fetch_url')
     def test_post_fetch_error(self, mock_fetch):
         mock_fetch.return_value = (None, 'boom')
         resp = self.client.post(
@@ -69,7 +74,7 @@ class HomeViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(Protocol.objects.count(), 0)
 
-    @patch('protocols.views.resolve_orgeo_url')
+    @patch('protocols.services.source_router.resolve_orgeo_url')
     def test_post_orgeo_resolve_error(self, mock_resolve):
         mock_resolve.return_value = ('', None, None, [], 'bad url')
         resp = self.client.post(
@@ -80,10 +85,10 @@ class HomeViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(Protocol.objects.count(), 0)
 
-    @patch('protocols.views.fetch_orgeo_document')
-    @patch('protocols.views.fetch_orgeo_with_browser')
-    @patch('protocols.views.fetch_orgeo_tables')
-    @patch('protocols.views.resolve_orgeo_url')
+    @patch('protocols.services.source_router.fetch_orgeo_document')
+    @patch('protocols.services.source_router.fetch_orgeo_with_browser')
+    @patch('protocols.services.source_router.fetch_orgeo_tables')
+    @patch('protocols.services.source_router.resolve_orgeo_url')
     def test_post_orgeo_tables_ok(self, mock_resolve, mock_tables, mock_browser, mock_doc):
         mock_resolve.return_value = (
             'https://orgeo.ru/online/1',
@@ -102,7 +107,7 @@ class HomeViewTests(TestCase):
         self.assertEqual(p.title, 'Event Name')
         self.assertEqual(p.event_date, date(2026, 4, 1))
 
-    @patch('protocols.views.fetch_sportident_tables')
+    @patch('protocols.services.source_router.fetch_sportident_tables')
     def test_post_sportident_error(self, mock_tables):
         mock_tables.return_value = (None, None, 'bad id')
         resp = self.client.post(
@@ -112,7 +117,7 @@ class HomeViewTests(TestCase):
         )
         self.assertEqual(Protocol.objects.count(), 0)
 
-    @patch('protocols.views.fetch_sportident_tables')
+    @patch('protocols.services.source_router.fetch_sportident_tables')
     def test_post_sportident_ok(self, mock_tables):
         mock_tables.return_value = (['<html>t1</html>'], 'Title SI', None)
         resp = self.client.post(
@@ -121,6 +126,51 @@ class HomeViewTests(TestCase):
         )
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(Protocol.objects.count(), 1)
+
+    @patch('protocols.services.source_router.fetch_url')
+    def test_post_sportorg_html_detected_by_content(self, mock_fetch):
+        """Ссылка на SportOrg-экспорт: вид, название и дата определяются сами."""
+        html = _race_html(_personal_race())
+        mock_fetch.return_value = (html, None)
+        with patch(
+            'protocols.services.sportorg_parser._fetch_html',
+            return_value=(html, None),
+        ):
+            resp = self.client.post(
+                reverse('protocols:home'),
+                data={'url': 'https://o-club.ru/results.html?sportorg=1'},
+            )
+        self.assertEqual(resp.status_code, 302)
+        protocol = Protocol.objects.get()
+        self.assertEqual(protocol.source_kind, KIND_SPORTORG)
+        self.assertEqual(protocol.event_date, date(2026, 7, 31))
+        self.assertIn('Кросс-спринт', protocol.title)
+
+    @patch('protocols.services.pdf_summary_parser.extract_pdf_text')
+    @patch('protocols.services.pdf_summary_parser.fetch_pdf_bytes')
+    def test_post_pdf_summary_link(self, mock_bytes, mock_text):
+        """PDF с суммой многодневки грузится такой же ссылкой, без формы файла."""
+        mock_bytes.return_value = (b'%PDF-1.4', None)
+        mock_text.return_value = (OCLUB_POINTS_TEXT, None)
+        resp = self.client.post(
+            reverse('protocols:home'),
+            data={'url': 'https://o-club.ru/sum.pdf'},
+        )
+        self.assertEqual(resp.status_code, 302)
+        protocol = Protocol.objects.get()
+        self.assertEqual(protocol.source_kind, KIND_PDF_SUMMARY)
+        self.assertEqual(protocol.event_date, date(2026, 8, 2))
+
+    @patch('protocols.services.pdf_summary_parser.fetch_pdf_bytes')
+    def test_post_pdf_error_does_not_create_protocol(self, mock_bytes):
+        mock_bytes.return_value = (None, '404 Not Found')
+        resp = self.client.post(
+            reverse('protocols:home'),
+            data={'url': 'https://o-club.ru/missing.pdf'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Protocol.objects.count(), 0)
 
 
 class ProtocolDetailViewTests(TestCase):
@@ -182,6 +232,153 @@ class ProtocolDetailViewTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(p.results.count(), 1)
+
+
+class SportOrgProtocolProcessingTests(TestCase):
+    """Обработка SportOrg-протокола на странице протокола — как это делает пользователь."""
+
+    def setUp(self):
+        payload = SPORTORG_DATA_PREFIX + extract_race_b64(_race_html(_personal_race()))
+        self.protocol = make_protocol(
+            source_url='https://o-club.ru/results.html?sportorg=1',
+            source_kind=KIND_SPORTORG,
+            raw_html=payload,
+        )
+
+    def test_detail_page_has_no_date_form(self):
+        resp = self.client.get(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk])
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['is_sportorg'])
+        self.assertTrue(resp.context['can_show_all'])
+
+    def test_process_by_team_foton_saves_people(self):
+        resp = self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk},
+        )
+        self.assertEqual(resp.status_code, 302)
+        saved = sorted(self.protocol.results.values_list('last_name', flat=True))
+        self.assertEqual(saved, ['Антонова', 'Нестерова'])
+        self.assertTrue(self.protocol.results.filter(points__gt=0).exists())
+
+    def test_process_by_known_participants(self):
+        make_known_participant(last_name='Антонова', first_name='Дарья')
+        resp = self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': '', 'protocol_id': self.protocol.pk},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            list(self.protocol.results.values_list('last_name', flat=True)),
+            ['Антонова'],
+        )
+
+    def test_found_people_are_added_to_known_base(self):
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk},
+        )
+        self.assertTrue(
+            KnownParticipant.objects.filter(
+                last_name='Нестерова', first_name='Ксения'
+            ).exists()
+        )
+
+    def test_show_all_lists_everyone(self):
+        self.client.get(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk])
+            + '?show_all=1'
+        )
+        self.assertEqual(self.protocol.results.count(), 4)
+
+
+class PdfSummaryProtocolProcessingTests(TestCase):
+    """Обработка PDF-суммы, загруженной по ссылке."""
+
+    def setUp(self):
+        self.protocol = make_protocol(
+            source_url='https://o-club.ru/sum.pdf',
+            source_kind=KIND_PDF_SUMMARY,
+            raw_html=f'{PDF_SUMMARY_PREFIX}{OCLUB_POINTS_TEXT}',
+        )
+
+    def test_process_by_team_foton_saves_people(self):
+        resp = self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk},
+        )
+        self.assertEqual(resp.status_code, 302)
+        saved = sorted(self.protocol.results.values_list('last_name', flat=True))
+        self.assertEqual(saved, ['Алексеев', 'Белотелов'])
+
+    def test_pdf_summary_can_be_reparsed(self):
+        """В отличие от скана, PDF-сумма перепарсивается без повторной загрузки."""
+        url = reverse('protocols:protocol_detail', args=[self.protocol.pk])
+        self.client.post(url, data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk})
+        self.assertNotIn(
+            'Вольнов', self.protocol.results.values_list('last_name', flat=True)
+        )
+
+        self.client.post(url, data={'team_name': 'Лыткарино', 'protocol_id': self.protocol.pk})
+        names = set(self.protocol.results.values_list('last_name', flat=True))
+        # Участник новой команды найден; ранее найденные остались через базу участников.
+        self.assertIn('Вольнов', names)
+        self.assertNotIn('Сетков', names)
+
+    def test_date_form_not_shown(self):
+        resp = self.client.get(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk])
+        )
+        self.assertFalse(resp.context['show_date_form'])
+        self.assertTrue(resp.context['is_pdf_summary'])
+
+
+class ExcludedParticipantProcessingTests(TestCase):
+    """Помеченные «не учитывать никогда» не попадают в результаты обработки."""
+
+    def setUp(self):
+        payload = SPORTORG_DATA_PREFIX + extract_race_b64(_race_html(_personal_race()))
+        self.protocol = make_protocol(
+            source_url='https://o-club.ru/results.html?sportorg=1',
+            source_kind=KIND_SPORTORG,
+            raw_html=payload,
+        )
+        excluded = make_known_participant(last_name='Нестерова', first_name='Ксения')
+        excluded.excluded = True
+        excluded.save(update_fields=['excluded'])
+
+    def test_excluded_person_is_dropped_even_when_team_matches(self):
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk},
+        )
+        saved = list(self.protocol.results.values_list('last_name', flat=True))
+        self.assertEqual(saved, ['Антонова'])
+
+    def test_excluded_person_is_not_searched_by_base(self):
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': '', 'protocol_id': self.protocol.pk},
+        )
+        self.assertFalse(self.protocol.results.filter(last_name='Нестерова').exists())
+
+    def test_excluded_flag_survives_processing(self):
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': 'Фотон', 'protocol_id': self.protocol.pk},
+        )
+        participant = KnownParticipant.objects.get(
+            last_name='Нестерова', first_name='Ксения'
+        )
+        self.assertTrue(participant.excluded)
+
+    def test_known_participants_page_shows_status(self):
+        resp = self.client.get(reverse('protocols:known_participants'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['excluded_count'], 1)
+        self.assertContains(resp, 'не учитывается')
 
 
 class SetProtocolTitleViewTests(TestCase):

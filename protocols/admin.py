@@ -7,6 +7,7 @@ from .models import (
     Event,
     KnownParticipant,
     Protocol,
+    ProtocolGroupLevel,
     ProtocolResult,
     SeasonRanking,
     SeasonRankingEntry,
@@ -28,6 +29,14 @@ class EventAdmin(admin.ModelAdmin):
     ordering = ('-date',)
 
 
+class ProtocolGroupLevelInline(admin.TabularInline):
+    model = ProtocolGroupLevel
+    extra = 1
+    autocomplete_fields = ('championship_level',)
+    verbose_name = 'Уровень для отдельной группы'
+    verbose_name_plural = 'Уровни для отдельных групп'
+
+
 @admin.register(Protocol)
 class ProtocolAdmin(admin.ModelAdmin):
     list_display = ('id', 'title', 'event_date', 'championship_level', 'importance', 'source_url', 'format_sfr', 'created_at')
@@ -36,13 +45,19 @@ class ProtocolAdmin(admin.ModelAdmin):
     search_fields = ('title', 'source_url')
     date_hierarchy = 'event_date'
     autocomplete_fields = ('championship_level',)
+    inlines = [ProtocolGroupLevelInline]
     fieldsets = (
         (None, {
             'fields': ('event', 'championship_level', 'source_url', 'title', 'event_date', 'raw_html', 'encoding_utf8', 'format_sfr'),
         }),
         ('Коэффициент для зачёта сезона', {
             'fields': ('importance',),
-            'description': 'Выберите уровень первенства выше — его коэффициент будет использоваться. Либо задайте коэффициент здесь, если уровень не выбран.',
+            'description': (
+                'Выберите уровень первенства выше — его коэффициент будет использоваться. '
+                'Либо задайте коэффициент здесь, если уровень не выбран. '
+                'Если у части групп статус другой (например, первенство России только у МЖ14 и МЖ16), '
+                'добавьте эти группы в блоке «Уровни для отдельных групп» ниже.'
+            ),
         }),
     )
 
@@ -56,23 +71,40 @@ class ProtocolResultAdmin(admin.ModelAdmin):
 
 @admin.register(KnownParticipant)
 class KnownParticipantAdmin(admin.ModelAdmin):
-    list_display = ('last_name', 'first_name', 'group_name', 'veteran')
-    list_filter = ('veteran',)
-    list_editable = ('group_name', 'veteran')
+    list_display = ('last_name', 'first_name', 'group_name', 'group_filter', 'split_by_group', 'veteran', 'excluded')
+    list_filter = ('veteran', 'excluded', 'split_by_group')
+    list_editable = ('group_name', 'group_filter', 'split_by_group', 'veteran', 'excluded')
     search_fields = ('last_name', 'first_name', 'group_name')
-    actions = ['mark_as_veteran', 'unmark_veteran']
+    actions = ['mark_as_veteran', 'unmark_veteran', 'mark_as_excluded', 'unmark_excluded']
 
     fieldsets = (
         (None, {
             'fields': ('last_name', 'first_name', 'group_name'),
         }),
+        ('Полные тёзки', {
+            'fields': ('group_filter', 'split_by_group'),
+            'description': (
+                'Если в протоколах встречается однофамилец с тем же именем из другой '
+                'возрастной группы, укажите группы этого участника через запятую: '
+                '«М21+» — все группы М от 21 и старше, либо точные названия («М60», '
+                '«Юноши до 17 лет»). Результаты в чужих группах будут отброшены.'
+            ),
+        }),
         ('Ветеран / Сезонный зачёт', {
             'fields': ('veteran',),
-            'description': 'Включите «Ветеран», чтобы участник не попадал в сезонный зачёт и экспорт по сезону.',
+            'description': 'Включите «Ветеран», чтобы участник попадал в ветеранские листы экспорта, а не в основной зачёт.',
+        }),
+        ('Исключение из зачёта', {
+            'fields': ('excluded',),
+            'description': (
+                'Включите «Не учитывать никогда» для тех, кто бежал за команду разово '
+                'и в состав не входит: такие участники не ищутся при обработке протоколов '
+                'и не попадают ни в основной зачёт, ни в ветеранский.'
+            ),
         }),
     )
 
-    @admin.action(description='Отметить как ветеранов (не в зачёт сезона)')
+    @admin.action(description='Отметить как ветеранов (в ветеранские листы)')
     def mark_as_veteran(self, request, queryset):
         updated = queryset.update(veteran=True)
         self.message_user(request, f'Отмечено как ветеранов: {updated}.')
@@ -81,6 +113,16 @@ class KnownParticipantAdmin(admin.ModelAdmin):
     def unmark_veteran(self, request, queryset):
         updated = queryset.update(veteran=False)
         self.message_user(request, f'Убрано из ветеранов: {updated}.')
+
+    @admin.action(description='Не учитывать никогда (исключить из всех зачётов)')
+    def mark_as_excluded(self, request, queryset):
+        updated = queryset.update(excluded=True)
+        self.message_user(request, f'Исключено из зачётов: {updated}.')
+
+    @admin.action(description='Вернуть в зачёт (снять исключение)')
+    def unmark_excluded(self, request, queryset):
+        updated = queryset.update(excluded=False)
+        self.message_user(request, f'Возвращено в зачёт: {updated}.')
 
 
 @admin.register(SeasonRanking)

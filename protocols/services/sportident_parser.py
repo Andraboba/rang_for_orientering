@@ -81,6 +81,28 @@ def _fetch_html_best_effort(url: str) -> Tuple[Optional[str], Optional[str]]:
     return raw.decode("windows-1251", errors="replace"), None
 
 
+def _extract_group_name(html: str) -> str:
+    """
+    Название группы со страницы результатов SportIdent.
+
+    Группа нужна, чтобы различать полных тёзок из разных возрастных групп,
+    поэтому пробуем три места: заголовок таблицы, подпись рядом с ней и
+    подсвеченную кнопку текущей группы в списке групп.
+    """
+    patterns = (
+        r"<div[^>]+class=['\"][^'\"]*title_grup[^'\"]*['\"][^>]*>(.*?)</div>",
+        r"class=['\"]name_grup['\"][^>]*>(.*?)<",
+        r"class=['\"]button_hov[^'\"]*['\"][^>]*>\s*<a[^>]*>(.*?)</a>",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            name = _clean_text(match.group(1)).strip(" ,")
+            if name:
+                return name
+    return ""
+
+
 def _seconds_from_time(value: str) -> Optional[int]:
     value = (value or "").strip()
     if not value:
@@ -103,10 +125,12 @@ def _seconds_from_time(value: str) -> Optional[int]:
 
 
 def _calc_points(t_actual_sec: int, t_leader_sec: int) -> int:
-    if t_leader_sec <= 0:
+    # Нулевое время — не результат, а «00:00:00» у не стартовавших:
+    # без этой проверки формула дала бы 2000 очков.
+    if t_leader_sec <= 0 or t_actual_sec <= 0:
         return 0
     points = int((2 - t_actual_sec / t_leader_sec) * 1000)
-    return max(1, points)
+    return min(1000, max(1, points))
 
 
 def _normalize_status(cells_text: List[str]) -> Optional[str]:
@@ -180,14 +204,7 @@ def parse_sportident(
         for ln, fn in base_pairs
     }
 
-    group_name = ""
-    m_group = re.search(
-        r"<div[^>]+class=['\"][^'\"]*title_grup[^'\"]*['\"][^>]*>(.*?)</div>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if m_group:
-        group_name = _clean_text(m_group.group(1))
+    group_name = _extract_group_name(html)
 
     rows = re.findall(
         r"<tr[^>]+class=['\"][^'\"]*hoverRow[^'\"]*['\"][^>]*>(.*?)</tr>",

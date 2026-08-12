@@ -16,24 +16,20 @@ from .forms import (
     SeasonExportDateRangeForm,
     EditProtocolTitleForm,
 )
-from .services.parser import (
-    fetch_url,
-    extract_title,
-    parse_and_process,
+from .services.source_router import (
+    KIND_ORGEO,
+    KIND_PDF_OCR,
+    KIND_PDF_SUMMARY,
+    KIND_SPORTIDENT,
+    KIND_SPORTORG,
+    KIND_WINORIENT,
+    load_from_url,
+    parse_payload,
+    show_all_team_name,
 )
-from .services.orgeo_parser import parse_orgeo, fetch_orgeo_document
-from .services.orgeo_browser import (
-    fetch_orgeo_with_browser,
-    fetch_orgeo_tables,
-    ORGEO_TABLES_DELIMITER,
-    resolve_orgeo_url,
-)
-from .services.sportident_parser import (
-    SPORTIDENT_TABLES_DELIMITER,
-    fetch_sportident_tables,
-    parse_sportident,
-)
+from .services.group_filter import filter_by_group_rules
 from .services.season_export import (
+    excluded_name_pairs,
     export_season_excel,
     export_season_excel_by_period,
     export_season_excel_by_date_range,
@@ -53,97 +49,37 @@ def home(request):
     protocols = protocols[:30]
     form = LoadProtocolForm(request.POST or None)
     if request.method == 'POST' and form.is_valid():
-        url = form.cleaned_data['url']
-        encoding_utf8 = form.cleaned_data['encoding_utf8']
-        format_sfr = form.cleaned_data['format_sfr']
         championship_level = form.cleaned_data['championship_level']
 
-        url_to_fetch = url
-        orgeo_title = None
-        orgeo_date = None  # дата соревнования (YYYY-MM-DD) из API Orgeo
-        sportident_title = None
-
-        # Orgeo: resolve_orgeo_url нормализует любую ссылку
-        # (live/#/winter26, live/#/48979, online/48979, finish/...) в /online/{id}
-        # и возвращает название и дату соревнования.
-        if 'orgeo.ru' in url:
-            app_url, orgeo_title, orgeo_date, orgeo_days, resolve_err = (
-                resolve_orgeo_url(url)
-            )
-            if resolve_err:
-                messages.error(request, f'Orgeo: {resolve_err}')
-                return redirect('protocols:home')
-
-            if not orgeo_date and orgeo_days:
-                for day in orgeo_days:
-                    d = (day or {}).get('date') or ''
-                    if d:
-                        orgeo_date = d
-                        break
-
-            # Запомним нормализованный URL для сохранения в БД.
-            url = app_url
-
-            # Загружаем все группы соревнования.
-            tables, err = fetch_orgeo_tables(app_url)
-            if tables:
-                text = ORGEO_TABLES_DELIMITER.join(tables)
-                err = None
-            else:
-                if err:
-                    messages.warning(
-                        request,
-                        f'Orgeo (сеть): {err}. Пробуем загрузку страницы.',
-                    )
-                text, err = fetch_orgeo_with_browser(app_url)
-                if err or not text:
-                    text, err = fetch_orgeo_document(app_url)
-            encoding_utf8 = True
-            format_sfr = False
-        elif 'sportident.online' in url:
-            tables, sportident_title, err = fetch_sportident_tables(url)
-            if err:
-                messages.error(request, f'SportIdent: {err}')
-                return redirect('protocols:home')
-            text = SPORTIDENT_TABLES_DELIMITER.join(tables or [])
-            encoding_utf8 = True
-            format_sfr = False
-        else:
-            text, err = fetch_url(url_to_fetch, encoding_utf8=encoding_utf8)
-        if err:
-            messages.error(request, f'Ошибка загрузки: {err}')
+        # Вид источника (Orgeo, SportIdent, SportOrg, PDF, WinOrient)
+        # определяется автоматически — пользователю достаточно вставить ссылку.
+        loaded = load_from_url(
+            form.cleaned_data['url'],
+            encoding_utf8=form.cleaned_data['encoding_utf8'],
+            format_sfr=form.cleaned_data['format_sfr'],
+        )
+        for warning in loaded.warnings:
+            messages.warning(request, warning)
+        if loaded.error:
+            messages.error(request, loaded.error)
             return redirect('protocols:home')
-        # Проверка: для Orgeo в сохранённом HTML должна быть таблица.
-        if 'orgeo.ru' in url and text:
-            if 'Фамилия' not in text and 'П/п' not in text and '<table' not in text:
-                messages.warning(
-                    request,
-                    'Страница Orgeo загружена без таблицы результатов. '
-                    'Установите Playwright в то же окружение, откуда запускаете Django: '
-                    'pip install playwright, затем: playwright install chromium',
-                )
-        # Для Orgeo/SportIdent используем название из API/страницы события.
-        if 'orgeo.ru' in url and orgeo_title:
-            title = orgeo_title
-        elif 'sportident.online' in url and sportident_title:
-            title = sportident_title
-        else:
-            title = extract_title(text, format_sfr)
-        raw_title = title or url[:80]
+
+        raw_title = loaded.title or loaded.url[:80]
         protocol = Protocol.objects.create(
-            source_url=url,
+            source_url=loaded.url,
+            source_kind=loaded.kind,
             title=clean_protocol_title(raw_title) or raw_title,
-            raw_html=text,
-            encoding_utf8=encoding_utf8,
-            format_sfr=format_sfr,
+            raw_html=loaded.payload,
+            encoding_utf8=loaded.encoding_utf8,
+            format_sfr=loaded.format_sfr,
             championship_level=championship_level,
         )
-        if orgeo_date:
+        if loaded.event_date:
             try:
                 from datetime import datetime
 
                 protocol.event_date = datetime.strptime(
-                    orgeo_date, '%Y-%m-%d'
+                    loaded.event_date, '%Y-%m-%d'
                 ).date()
                 protocol.save(update_fields=['event_date'])
             except (ValueError, TypeError):
@@ -167,13 +103,16 @@ def home(request):
 def protocol_detail(request, pk):
     """Просмотр протокола и форма обработки по команде."""
     protocol = get_object_or_404(Protocol, pk=pk)
-    is_orgeo = bool(protocol.source_url and 'orgeo.ru' in protocol.source_url)
-    is_sportident = bool(
-        protocol.source_url and 'sportident.online' in protocol.source_url
-    )
-    is_pdf = bool(protocol.source_url and protocol.source_url.startswith('pdf_upload:'))
-    is_winorient = not is_orgeo and not is_sportident and not is_pdf
-    needs_manual_event_date = not is_orgeo and not is_pdf
+    kind = protocol.kind
+    is_orgeo = kind == KIND_ORGEO
+    is_sportident = kind == KIND_SPORTIDENT
+    is_sportorg = kind == KIND_SPORTORG
+    is_pdf_summary = kind == KIND_PDF_SUMMARY
+    # PDF со сканом (OCR) — единственный источник, который нельзя перепарсить.
+    is_pdf = kind == KIND_PDF_OCR
+    is_winorient = kind == KIND_WINORIENT
+    # Дату сами определяют Orgeo, SportOrg и PDF-суммы.
+    needs_manual_event_date = kind in (KIND_WINORIENT, KIND_SPORTIDENT)
 
     form = ProcessProtocolForm(initial={'protocol_id': protocol.pk})
     form.fields['protocol_id'].initial = protocol.pk
@@ -181,7 +120,7 @@ def protocol_detail(request, pk):
     results_qs = protocol.results.select_related(
         'protocol',
         'protocol__championship_level',
-    )
+    ).prefetch_related('protocol__group_levels__championship_level')
     # Для PDF-протоколов храним все результаты; «командные» — team_member=True.
     if is_pdf:
         results = results_qs.filter(team_member=True)
@@ -204,28 +143,16 @@ def protocol_detail(request, pk):
         )
         show_date_form = True
 
-    # Режим "показать всех участников Orgeo" для отладки/проверки.
+    # Режим "показать всех участников" для отладки/проверки.
     show_all = request.GET.get('show_all') == '1'
-    if show_all and (is_orgeo or is_sportident):
-        delimiter = (
-            ORGEO_TABLES_DELIMITER if is_orgeo else SPORTIDENT_TABLES_DELIMITER
+    if show_all and not is_pdf:
+        parsed = parse_payload(
+            kind,
+            protocol.raw_html,
+            base_pairs=[],
+            team_name=show_all_team_name(kind),
+            format_sfr=protocol.format_sfr,
         )
-        chunks = (
-            protocol.raw_html.split(delimiter)
-            if delimiter in protocol.raw_html
-            else [protocol.raw_html]
-        )
-        parsed = []
-        for html_chunk in chunks:
-            if html_chunk.strip():
-                if is_orgeo:
-                    parsed.extend(
-                        parse_orgeo(html_chunk, base_pairs=[], team_name='')
-                    )
-                else:
-                    parsed.extend(
-                        parse_sportident(html_chunk, base_pairs=[], team_name='*')
-                    )
         protocol.results.all().delete()
         for r in parsed:
             ProtocolResult.objects.create(
@@ -260,58 +187,40 @@ def protocol_detail(request, pk):
         if form.is_valid():
             team_name = (form.cleaned_data.get('team_name') or '').strip()
 
-            # Список уже известных участников (СК Фотон и др.)
+            # Список уже известных участников (СК Фотон и др.).
+            # Помеченных «не учитывать никогда» не ищем вовсе.
             base_pairs = list(
-                KnownParticipant.objects.values_list('last_name', 'first_name')
+                KnownParticipant.objects.filter(excluded=False)
+                .values_list('last_name', 'first_name')
+            )
+            excluded_pairs = excluded_name_pairs()
+
+            # WinOrient не умеет «показать всех»: без команды и без базы
+            # фильтровать не по чему.
+            if is_winorient and not team_name and not base_pairs:
+                messages.warning(
+                    request,
+                    'Введите название команды или добавьте участников в базу.',
+                )
+                return redirect('protocols:protocol_detail', pk=pk)
+
+            # Парсер выбирается по виду источника; правила фильтрации общие.
+            parsed = parse_payload(
+                kind,
+                protocol.raw_html,
+                base_pairs=base_pairs,
+                team_name=team_name,
+                format_sfr=protocol.format_sfr,
             )
 
-            # Для Orgeo/SportIdent: парсим все таблицы (все группы),
-            # фильтр по команде или по базе.
-            if is_orgeo or is_sportident:
-                delimiter = (
-                    ORGEO_TABLES_DELIMITER
-                    if is_orgeo
-                    else SPORTIDENT_TABLES_DELIMITER
-                )
-                chunks = (
-                    protocol.raw_html.split(delimiter)
-                    if delimiter in protocol.raw_html
-                    else [protocol.raw_html]
-                )
-                parsed = []
-                for html_chunk in chunks:
-                    if html_chunk.strip():
-                        if is_orgeo:
-                            parsed.extend(
-                                parse_orgeo(
-                                    html_chunk,
-                                    base_pairs=base_pairs,
-                                    team_name=team_name,
-                                )
-                            )
-                        else:
-                            parsed.extend(
-                                parse_sportident(
-                                    html_chunk,
-                                    base_pairs=base_pairs,
-                                    team_name=team_name,
-                                )
-                            )
-            else:
-                # WinOrient: фильтр по команде, по базе участников, или по обоим.
-                # Если команда не указана — используем только базу участников.
-                if not team_name and not base_pairs:
-                    messages.warning(
-                        request,
-                        'Введите название команды или добавьте участников в базу.',
-                    )
-                    return redirect('protocols:protocol_detail', pk=pk)
-                parsed = parse_and_process(
-                    protocol.raw_html,
-                    protocol.format_sfr,
-                    team_name,
-                    base_pairs,
-                )
+            # Исключённых отбрасываем, даже если они нашлись по названию команды.
+            parsed = [
+                r for r in parsed
+                if (r['last_name'].strip().lower(), r['first_name'].strip().lower())
+                not in excluded_pairs
+            ]
+            # У полных тёзок из разных групп берём только «свои» группы.
+            parsed = filter_by_group_rules(parsed)
 
             protocol.results.all().delete()
             for r in parsed:
@@ -327,6 +236,8 @@ def protocol_detail(request, pk):
                 )
             # Обновляем базу известных участников (для WinOrient логика как раньше).
             for last_name, first_name in base_pairs:
+                if (last_name.strip().lower(), first_name.strip().lower()) in excluded_pairs:
+                    continue
                 KnownParticipant.objects.get_or_create(
                     last_name=last_name,
                     first_name=first_name,
@@ -354,7 +265,12 @@ def protocol_detail(request, pk):
             'all_pdf_results': all_pdf_results,
             'is_orgeo': is_orgeo,
             'is_sportident': is_sportident,
+            'is_sportorg': is_sportorg,
+            'is_pdf_summary': is_pdf_summary,
             'is_pdf': is_pdf,
+            'kind': kind,
+            # Перепарсить «всех подряд» можно везде, кроме скана PDF.
+            'can_show_all': not is_pdf and not is_winorient,
             'date_form': date_form,
             'show_date_form': show_date_form,
         },
@@ -382,7 +298,7 @@ def set_protocol_title(request, pk):
 def set_protocol_event_date(request, pk):
     """Сохранить дату соревнований для протокола (WinOrient)."""
     protocol = get_object_or_404(Protocol, pk=pk)
-    if protocol.source_url and 'orgeo.ru' in protocol.source_url:
+    if protocol.kind == KIND_ORGEO:
         messages.warning(
             request, 'Для протоколов Orgeo дата берётся из события.'
         )
@@ -410,6 +326,7 @@ def known_participants(request):
         'protocols/known_participants.html',
         {
             'participants': participants,
+            'excluded_count': sum(1 for p in participants if p.excluded),
         },
     )
 
@@ -705,6 +622,7 @@ def load_pdf_protocol(request):
     if parsed.prologue_results:
         prologue_protocol = Protocol.objects.create(
             source_url=source_label,
+            source_kind=KIND_PDF_OCR,
             title=f'{base_title} — Пролог',
             raw_html=raw_ocr,
             encoding_utf8=True,
@@ -738,6 +656,7 @@ def load_pdf_protocol(request):
     if parsed.finish_results:
         finish_protocol = Protocol.objects.create(
             source_url=source_label,
+            source_kind=KIND_PDF_OCR,
             title=f'{base_title} — Финиш',
             raw_html=raw_ocr,
             encoding_utf8=True,
@@ -782,7 +701,7 @@ def load_pdf_protocol(request):
 def pdf_ocr_text(request, pk):
     """Показывает сырой OCR-текст PDF-протокола для диагностики."""
     protocol = get_object_or_404(Protocol, pk=pk)
-    if not (protocol.source_url and protocol.source_url.startswith('pdf_upload:')):
+    if protocol.kind != KIND_PDF_OCR:
         return HttpResponse('Не PDF протокол.', status=400, content_type='text/plain; charset=utf-8')
     return HttpResponse(
         protocol.raw_html or '(OCR-текст не сохранён — загрузите PDF снова)',
@@ -798,7 +717,7 @@ def pdf_update_team(request, pk):
     остальным — False.
     """
     protocol = get_object_or_404(Protocol, pk=pk)
-    if not (protocol.source_url and protocol.source_url.startswith('pdf_upload:')):
+    if protocol.kind != KIND_PDF_OCR:
         messages.error(request, 'Функция доступна только для PDF-протоколов.')
         return redirect('protocols:protocol_detail', pk=pk)
 

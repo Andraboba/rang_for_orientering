@@ -116,10 +116,12 @@ def _seconds_from_time(s: str) -> Optional[int]:
 
 def _calc_points(t_actual_sec: int, t_leader_sec: int) -> int:
     """Очки по формуле (2 - t_actual/t_leader) * 1000, минимум 1 при наличии времени."""
-    if t_leader_sec <= 0:
+    # Нулевое время означает отсутствие результата («00:00:00» у не стартовавших),
+    # иначе формула выдала бы больше 1000 очков.
+    if t_leader_sec <= 0 or t_actual_sec <= 0:
         return 0
     points = int((2 - t_actual_sec / t_leader_sec) * 1000)
-    return max(1, points)
+    return min(1000, max(1, points))
 
 
 def _count_participants(rows_html: List[str]) -> int:
@@ -321,8 +323,10 @@ def parse_orgeo_relay(
 
         # Фильтрация — всегда по-участниково:
         # участник попадает в результаты, если его клуб (cells[3]) совпадает
-        # с team_name ИЛИ он есть в базе known.
-        if team_name_lower:
+        # с team_name ИЛИ он есть в базе known. '*' — показать всех.
+        if team_name_lower == '*':
+            filtered = [(ln, fn) for ln, fn, _club in members]
+        elif team_name_lower:
             filtered = [
                 (ln, fn) for ln, fn, club in members
                 if team_name_lower in club.lower()
@@ -431,8 +435,10 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
         first_name = first_name.strip()
         key_normalized = (last_name.lower(), first_name.lower())
 
-        # ── Фильтрация ──
-        if team_name:
+        # ── Фильтрация ('*' — показать всех) ──
+        if team_name == '*':
+            pass
+        elif team_name:
             team_matches = team_name.lower() in team_cell.lower()
             known_matches = key_normalized in known
             if not team_matches and not known_matches:

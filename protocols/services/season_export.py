@@ -22,9 +22,26 @@ from ..models import (
     SeasonRankingEntry,
 )
 
+# Тёзки, которых нужно разделять по группам, задаются флагом
+# KnownParticipant.split_by_group. Этот набор оставлен для участников,
+# заведённых до появления флага.
 GROUP_SPLIT_EXCEPTIONS = {
     ('поздновский', 'сергей'),
 }
+
+
+def _split_by_group_pairs():
+    """Пары (фамилия, имя), которых в зачёте разделяем по группам."""
+    from .group_filter import _normalize  # локальный импорт: единая нормализация
+
+    pairs = set(GROUP_SPLIT_EXCEPTIONS)
+    pairs.update(
+        (_normalize(last_name), _normalize(first_name))
+        for last_name, first_name in KnownParticipant.objects.filter(
+            split_by_group=True
+        ).values_list('last_name', 'first_name')
+    )
+    return pairs
 
 
 def _normalize_group_name(name: str) -> str:
@@ -43,6 +60,7 @@ def _build_name_disambiguation(protocol_ids):
     """
     if not protocol_ids:
         return {}
+    split_pairs = _split_by_group_pairs()
     rows = (
         ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .values('last_name', 'first_name', 'group_name')
@@ -57,7 +75,7 @@ def _build_name_disambiguation(protocol_ids):
     for key, groups in groups_by_name.items():
         ln, fn = key
         normalized = ((ln or '').strip().lower(), (fn or '').strip().lower())
-        split_flags[key] = normalized in GROUP_SPLIT_EXCEPTIONS
+        split_flags[key] = normalized in split_pairs
     return split_flags
 
 
@@ -74,6 +92,17 @@ def _veteran_name_pairs():
     return set(
         (ln.strip().lower(), fn.strip().lower())
         for ln, fn in KnownParticipant.objects.filter(veteran=True).values_list('last_name', 'first_name')
+    )
+
+
+def excluded_name_pairs():
+    """
+    Пары (фамилия, имя) участников с флагом «Не учитывать никогда».
+    Такие не попадают ни в основной зачёт, ни в ветеранский.
+    """
+    return set(
+        (ln.strip().lower(), fn.strip().lower())
+        for ln, fn in KnownParticipant.objects.filter(excluded=True).values_list('last_name', 'first_name')
     )
 
 
@@ -128,6 +157,7 @@ def build_places_data(protocols, veterans_only=False):
       - start_columns: [(protocol_obj, start_idx), ...] для заголовка Excel
     """
     veteran_set = _veteran_name_pairs()
+    excluded_set = excluded_name_pairs()
     protocol_ids = [p.id for p in protocols]
     protocol_by_id = {p.id: p for p in protocols}
     split_by_group = _build_name_disambiguation(protocol_ids)
@@ -141,7 +171,10 @@ def build_places_data(protocols, veterans_only=False):
     seen_key_pid = set()
     for r in results:
         ln, fn = r['last_name'], r['first_name']
-        is_veteran = (ln.strip().lower(), fn.strip().lower()) in veteran_set
+        name_key = (ln.strip().lower(), fn.strip().lower())
+        if name_key in excluded_set:
+            continue
+        is_veteran = name_key in veteran_set
         if veterans_only and not is_veteran:
             continue
         if not veterans_only and is_veteran:
@@ -174,6 +207,7 @@ def build_points_data(ranking, veterans_only=False):
         .select_related('participant')
         .order_by('-points', 'participant__last_name', 'participant__first_name')
     )
+    qs = qs.exclude(participant__excluded=True)
     if veterans_only:
         qs = qs.filter(participant__veteran=True)
     else:
@@ -197,17 +231,23 @@ def build_points_data_from_protocols(protocols, max_starts=None, veterans_only=F
         return []
 
     veteran_set = _veteran_name_pairs()
+    excluded_set = excluded_name_pairs()
     protocol_ids = [p.id for p in protocols]
     split_by_group = _build_name_disambiguation(protocol_ids)
     rows = (
         ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .select_related('protocol', 'protocol__championship_level')
+        # Переопределения уровня по группам — одним запросом, без N+1.
+        .prefetch_related('protocol__group_levels__championship_level')
     )
     # per_start[person_key][protocol_id] = суммарные взвешенные очки за старт
     per_start = defaultdict(lambda: defaultdict(float))
     for r in rows:
         ln, fn = r.last_name, r.first_name
-        is_veteran = (ln.strip().lower(), fn.strip().lower()) in veteran_set
+        name_key = (ln.strip().lower(), fn.strip().lower())
+        if name_key in excluded_set:
+            continue
+        is_veteran = name_key in veteran_set
         if veterans_only and not is_veteran:
             continue
         if not veterans_only and is_veteran:

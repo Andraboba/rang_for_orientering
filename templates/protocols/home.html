@@ -5,6 +5,11 @@
 {% block content %}
     <div class="card">
         <h2>Загрузить протокол по ссылке</h2>
+        <p class="meta">
+            Вид протокола определяется автоматически: Orgeo (<code>live/#/</code>, <code>/event/</code>, <code>/online/</code>),
+            SportIdent Online, SportOrg (o-club.ru и т.п.), PDF с суммой многодневки, WinOrient.
+            Название и дата соревнований подставляются сами, где источник их сообщает.
+        </p>
         <form method="post" action="{% url 'protocols:home' %}">
             {% csrf_token %}
             <div class="form-group">
@@ -12,12 +17,15 @@
                 {{ form.url }}
                 {% if form.url.errors %}<span class="error">{{ form.url.errors.0 }}</span>{% endif %}
             </div>
-            <div class="form-group">
-                <label>{{ form.encoding_utf8 }} {{ form.encoding_utf8.label }}</label>
-            </div>
-            <div class="form-group">
-                <label>{{ form.format_sfr }} {{ form.format_sfr.label }}</label>
-            </div>
+            <details style="margin-bottom: 1rem;">
+                <summary class="meta" style="cursor: pointer;">Параметры для WinOrient (для остальных источников не нужны)</summary>
+                <div class="form-group" style="margin-top: 0.5rem;">
+                    <label>{{ form.encoding_utf8 }} {{ form.encoding_utf8.label }}</label>
+                </div>
+                <div class="form-group">
+                    <label>{{ form.format_sfr }} {{ form.format_sfr.label }}</label>
+                </div>
+            </details>
             <div class="form-group">
                 <label for="id_championship_level">{{ form.championship_level.label }}</label>
                 {{ form.championship_level }}
@@ -29,8 +37,11 @@
     </div>
 
     <div class="card">
-        <h2>Загрузить PDF-протокол (Пролог + Финиш)</h2>
-        <p class="meta">Для сканированных PDF с двухэтапными результатами. Создаёт два протокола — «Пролог» и «Финиш». Обработка занимает несколько минут.</p>
+        <h2>Загрузить сканированный PDF (Пролог + Финиш)</h2>
+        <p class="meta">
+            Только для сканов с двухэтапными результатами — распознаются через OCR, обработка занимает несколько минут.
+            PDF с суммой многодневки загружайте ссылкой в форме выше: там текст читается напрямую, без распознавания.
+        </p>
         <form method="post" action="{% url 'protocols:load_pdf_protocol' %}" enctype="multipart/form-data">
             {% csrf_token %}
             <div class="form-group">

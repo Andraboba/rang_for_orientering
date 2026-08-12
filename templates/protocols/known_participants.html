@@ -4,20 +4,32 @@
 {% block content %}
     <div class="card">
         <h2>Участники в базе</h2>
-        <p class="meta">Список уже учтённых участников (дубли не показываются при обработке). Всего: {{ participants|length }}</p>
+        <p class="meta">
+            Список уже учтённых участников (дубли не показываются при обработке).
+            Всего: {{ participants|length }}{% if excluded_count %}, из них не учитываются: {{ excluded_count }}{% endif %}.
+            Флаги «Ветеран» и «Не учитывать никогда» меняются в админке.
+        </p>
         {% if participants %}
             <table>
                 <thead>
                     <tr>
                         <th>Фамилия</th>
                         <th>Имя</th>
+                        <th>Группа</th>
+                        <th>Зачёт</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for p in participants %}
-                    <tr>
+                    <tr{% if p.excluded %} style="opacity: 0.55;"{% endif %}>
                         <td>{{ p.last_name }}</td>
                         <td>{{ p.first_name }}</td>
+                        <td>{{ p.group_name|default:"—" }}</td>
+                        <td>
+                            {% if p.excluded %}не учитывается
+                            {% elif p.veteran %}ветеран
+                            {% else %}основной{% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

@@ -75,9 +75,9 @@
             </div>
             <button type="submit" class="btn">Обработать и показать результаты</button>
         </form>
-        {% if not results and is_orgeo or not results and is_sportident %}
+        {% if not results and can_show_all %}
             <p style="margin-top: 10px;">
-                <a href="?show_all=1" class="btn btn-secondary">Показать всех участников соревнований (Orgeo/SportIdent)</a>
+                <a href="?show_all=1" class="btn btn-secondary">Показать всех участников соревнований</a>
             </p>
         {% endif %}
         {% endif %}

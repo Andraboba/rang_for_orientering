@@ -129,6 +129,65 @@ class BuildDataTests(TestCase):
         self.assertEqual(build_points_data(r), [])
 
 
+class ExcludedParticipantTests(TestCase):
+    """
+    Флаг «Не учитывать никогда»: участник бежал за команду разово и в зачёт
+    не идёт — ни в основной, ни в ветеранский.
+    """
+
+    def setUp(self):
+        self.event = make_event(title='E', date=date(2026, 4, 1), season=Event.SEASON_SPRING)
+        self.p = make_protocol(event=self.event)
+        make_result(
+            self.p, group_name='М14', last_name='Иванов', first_name='Иван',
+            place='1', place_out_of=2, points=1000,
+        )
+        make_result(
+            self.p, group_name='Ждо15', last_name='Горина', first_name='Василиса',
+            place='2', place_out_of=2, points=500,
+        )
+        self.excluded = make_known_participant(
+            last_name='Горина', first_name='Василиса'
+        )
+        self.excluded.excluded = True
+        self.excluded.save(update_fields=['excluded'])
+
+    def test_not_in_places_data(self):
+        people, _data, _starts = build_places_data([self.p])
+        self.assertEqual(people, [('Иванов', 'Иван')])
+
+    def test_not_in_veteran_places_data(self):
+        """Даже с флагом «ветеран» исключённый не попадает в ветеранские листы."""
+        self.excluded.veteran = True
+        self.excluded.save(update_fields=['veteran'])
+        people, _data, _starts = build_places_data([self.p], veterans_only=True)
+        self.assertEqual(people, [])
+
+    def test_not_in_points_from_protocols(self):
+        rows = build_points_data_from_protocols([self.p])
+        self.assertEqual([r[0] for r in rows], ['Иванов'])
+
+    def test_not_in_ranking_points(self):
+        ranking = make_ranking()
+        make_ranking_entry(ranking, self.excluded, points=99.0)
+        kp = make_known_participant(last_name='Иванов', first_name='Иван')
+        make_ranking_entry(ranking, kp, points=10.0)
+        self.assertEqual(build_points_data(ranking), [('Иванов', 'Иван', 10.0)])
+
+    def test_export_has_no_excluded_person(self):
+        content = export_season_excel_by_date_range(date(2026, 3, 1), date(2026, 5, 31))
+        workbook = load_workbook(BytesIO(content))
+        text = '\n'.join(
+            str(cell.value)
+            for sheet in workbook.worksheets
+            for row in sheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        )
+        self.assertIn('Иванов', text)
+        self.assertNotIn('Горина', text)
+
+
 class MultipleStartsPerProtocolTests(TestCase):
     def test_exception_splits_by_group(self):
         """Особый случай: фамилия из GROUP_SPLIT_EXCEPTIONS встречается в >1 группах."""

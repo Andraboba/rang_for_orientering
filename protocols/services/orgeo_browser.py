@@ -168,6 +168,7 @@ def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], List
       - https://orgeo.ru/live/#/48979/2        → https://orgeo.ru/online/48979
       - https://orgeo.ru/online/48979          → без изменений
       - https://orgeo.ru/online/finish/48979?… → https://orgeo.ru/online/48979
+      - https://orgeo.ru/event/48979           → https://orgeo.ru/online/48979
 
     Возвращает (normalized_url, event_title, event_date, days, error).
       event_date — строка "YYYY-MM-DD" или None (1-й день).
@@ -194,6 +195,12 @@ def resolve_orgeo_url(url: str) -> Tuple[str, Optional[str], Optional[str], List
     # Формат 3: /online/{id}
     if not event_uid:
         m = re.search(r'/online/(\d+)', url)
+        if m:
+            event_uid = m.group(1)
+
+    # Формат 4: страница события /event/{id} (в т.ч. /event/{id}/results и т.п.)
+    if not event_uid:
+        m = re.search(r'/event/(\d+)', url)
         if m:
             event_uid = m.group(1)
 

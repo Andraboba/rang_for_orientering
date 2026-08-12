@@ -84,6 +84,13 @@ class Protocol(models.Model):
         help_text='Первенство Москвы, Первенство России, Первенство и т.д. — коэффициент берётся из выбранного уровня.',
     )
     source_url = models.URLField('URL протокола', max_length=500, blank=True)
+    source_kind = models.CharField(
+        'Вид источника',
+        max_length=20,
+        blank=True,
+        default='',
+        help_text='Определяется автоматически при загрузке по ссылке.',
+    )
     title = models.CharField('Название протокола', max_length=300, blank=True)
     raw_html = models.TextField('Исходный HTML', blank=True)
     encoding_utf8 = models.BooleanField('Кодировка UTF-8 (иначе windows-1251)', default=False)
@@ -114,11 +121,90 @@ class Protocol(models.Model):
         return self.title or self.source_url or f'Протокол #{self.pk}'
 
     @property
+    def group_coefficients(self) -> dict:
+        """
+        {название группы (в нижнем регистре): коэффициент} — переопределения
+        уровня для отдельных групп протокола.
+        """
+        return {
+            override.group_name.strip().lower(): float(
+                override.championship_level.coefficient
+            )
+            for override in self.group_levels.all()
+            if override.championship_level
+        }
+
+    def coefficient_for_group(self, group_name: str) -> float:
+        """
+        Коэффициент для конкретной группы: переопределение уровня, если оно
+        задано, иначе общий коэффициент протокола.
+
+        Нужно для соревнований, где статус зависит от группы: например,
+        в Зеленограде первенство России только у МЖ14 и МЖ16, а остальные
+        группы бегут всероссийские соревнования.
+        """
+        overrides = self.group_coefficients
+        if overrides:
+            coefficient = overrides.get((group_name or '').strip().lower())
+            if coefficient:
+                return coefficient
+        return self.effective_coefficient
+
+    @property
+    def kind(self) -> str:
+        """
+        Вид источника протокола. Для записей, загруженных до появления поля
+        source_kind, определяется по содержимому и ссылке.
+        """
+        if self.source_kind:
+            return self.source_kind
+        from .services.source_router import detect_kind_by_payload
+
+        return detect_kind_by_payload(self.raw_html or '', self.source_url or '')
+
+    @property
     def effective_coefficient(self) -> float:
         """Коэффициент старта: уровень первенства или importance, если уровень не задан."""
         if self.championship_level and self.championship_level.coefficient:
             return float(self.championship_level.coefficient)
         return float(self.importance or 1.0)
+
+
+class ProtocolGroupLevel(models.Model):
+    """
+    Уровень первенства для отдельной группы протокола.
+
+    Бывает, что в одном протоколе часть групп бежит первенство России, а
+    остальные — всероссийские соревнования. Для таких групп коэффициент
+    задаётся здесь и перекрывает уровень всего протокола.
+    """
+
+    protocol = models.ForeignKey(
+        'Protocol',
+        on_delete=models.CASCADE,
+        related_name='group_levels',
+        verbose_name='Протокол',
+    )
+    group_name = models.CharField(
+        'Группа',
+        max_length=50,
+        help_text='Название группы ровно как в протоколе, например «Юноши до 15 лет».',
+    )
+    championship_level = models.ForeignKey(
+        ChampionshipLevel,
+        on_delete=models.CASCADE,
+        related_name='group_overrides',
+        verbose_name='Уровень первенства',
+    )
+
+    class Meta:
+        verbose_name = 'Уровень группы в протоколе'
+        verbose_name_plural = 'Уровни групп в протоколах'
+        unique_together = [['protocol', 'group_name']]
+        ordering = ['protocol', 'group_name']
+
+    def __str__(self):
+        return f'{self.group_name} → {self.championship_level}'
 
 
 class KnownParticipant(models.Model):
@@ -137,6 +223,48 @@ class KnownParticipant(models.Model):
         default=False,
         help_text='Если включено, участник не попадает в сезонный зачёт и экспорт по сезону.',
     )
+    excluded = models.BooleanField(
+        'Не учитывать никогда',
+        default=False,
+        db_index=True,
+        help_text=(
+            'Участник не ищется при обработке протоколов и не попадает ни в один '
+            'зачёт — ни в основной, ни в ветеранский. Для тех, кто бежал за команду '
+            'разово и в состав не входит.'
+        ),
+    )
+    group_filter = models.CharField(
+        'Допустимые группы',
+        max_length=200,
+        blank=True,
+        default='',
+        help_text=(
+            'Заполните, если есть полный тёзка из другой возрастной группы. '
+            'Через запятую: точные названия групп («М60», «Юноши до 17 лет») '
+            'или диапазон — «М21+» (группы М от 21 и старше, включая МЭ) и '
+            '«М18-» (группы М до 18 включительно). Результаты в других группах '
+            'будут считаться чужими.'
+        ),
+    )
+
+    split_by_group = models.BooleanField(
+        'Разделять по группам',
+        default=False,
+        help_text=(
+            'Включите, если в команде есть двое с одинаковыми фамилией и именем '
+            '(например, отец и сын). В зачёте они пойдут отдельными строками '
+            'с указанием группы.'
+        ),
+    )
+
+    def matches_group(self, group_name: str) -> bool:
+        """
+        Подходит ли результат в этой группе данному участнику.
+        Пустой фильтр — подходят любые группы.
+        """
+        from .services.group_filter import group_matches_rules
+
+        return group_matches_rules(group_name, self.group_filter)
 
     class Meta:
         verbose_name = 'Участник (база)'
@@ -144,9 +272,10 @@ class KnownParticipant(models.Model):
         unique_together = [['last_name', 'first_name', 'group_name']]
 
     def __str__(self):
+        name = f'{self.last_name} {self.first_name}'
         if self.group_name:
-            return f'{self.last_name} {self.first_name} ({self.group_name})'
-        return f'{self.last_name} {self.first_name}'
+            name = f'{name} ({self.group_name})'
+        return f'{name} — не учитывается' if self.excluded else name
 
 
 class ProtocolResult(models.Model):
@@ -195,10 +324,15 @@ class ProtocolResult(models.Model):
 
     @property
     def weighted_points(self) -> float:
-        """Баллы с учетом коэффициента старта протокола."""
+        """
+        Баллы с учётом коэффициента старта: для группы может быть задан свой
+        уровень первенства, иначе берётся коэффициент всего протокола.
+        """
         if not self.protocol_id:
             return float(self.points or 0)
-        return float(self.points or 0) * self.protocol.effective_coefficient
+        return float(self.points or 0) * self.protocol.coefficient_for_group(
+            self.group_name
+        )
 
 
 class SeasonRanking(models.Model):

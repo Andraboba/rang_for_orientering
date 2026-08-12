@@ -149,6 +149,28 @@ class ResolveOrgeoUrlTests(SimpleTestCase):
         url, *_ = resolve_orgeo_url('https://orgeo.ru/online/finish/49864?s=2&d=Ж10')
         self.assertEqual(url, 'https://orgeo.ru/online/49864')
 
+    @patch('protocols.services.orgeo_browser._fetch_orgeo_meta')
+    def test_resolve_event_page(self, mock_meta):
+        """Ссылка на страницу события /event/{id} — как её даёт сайт Orgeo."""
+        mock_meta.return_value = {
+            'event_id': '50662', 'event_name': 'Эстафета 3 человека',
+            'event_date': '2026-06-02', 'days': [], 'error': None,
+        }
+        url, title, dt, _days, err = resolve_orgeo_url('https://orgeo.ru/event/50662')
+        self.assertEqual(url, 'https://orgeo.ru/online/50662')
+        self.assertEqual(title, 'Эстафета 3 человека')
+        self.assertEqual(dt, '2026-06-02')
+        self.assertIsNone(err)
+
+    @patch('protocols.services.orgeo_browser._fetch_orgeo_meta')
+    def test_resolve_event_page_with_suffix(self, mock_meta):
+        mock_meta.return_value = {
+            'event_id': '50663', 'event_name': None, 'event_date': None,
+            'days': [], 'error': None,
+        }
+        url, *_ = resolve_orgeo_url('https://orgeo.ru/event/50663/results')
+        self.assertEqual(url, 'https://orgeo.ru/online/50663')
+
     def test_resolve_unknown_format(self):
         url, title, dt, days, err = resolve_orgeo_url('https://example.com/unknown')
         self.assertEqual(url, '')
