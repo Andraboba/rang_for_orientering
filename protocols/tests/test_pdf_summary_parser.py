@@ -367,6 +367,19 @@ class PdfPartsTests(SimpleTestCase):
         rows = parse_pdf_summary(payload, base_pairs=[("Аманова", "Анна")], team_name="")
         self.assertEqual(sorted(r["points"] for r in rows), [838, 1000])
 
+    def test_parts_of_one_date_are_one_day(self):
+        # Два файла Кубка клубов от 13.09 — один старт.
+        payload = CLUB_CUP_KIDS_TEXT + PDF_PART_DELIMITER + CLUB_CUP_STAGES_TEXT
+        rows = parse_pdf_summary(payload, base_pairs=[], team_name="*")
+        self.assertEqual({r["day"] for r in rows}, {1})
+
+    def test_parts_of_different_dates_are_different_days(self):
+        # Первенство России: эстафета 02.10 и личный старт 13.09 из другого файла.
+        payload = SPORTORG_RELAY_TEXT + PDF_PART_DELIMITER + CLUB_CUP_STAGES_TEXT
+        rows = parse_pdf_summary(payload, base_pairs=[], team_name="*")
+        days = {r["group_name"]: r["day"] for r in rows}
+        self.assertEqual(days, {"МЖ14": 1, "1 этап (М16, М45, Ж35)": 2})
+
     def test_relay_and_individual_parts(self):
         payload = SPORTORG_RELAY_TEXT + PDF_PART_DELIMITER + CLUB_CUP_STAGES_TEXT
         rows = parse_pdf_summary(payload, base_pairs=[], team_name="*")

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase
 
 from protocols.services.orgeo_browser import (
+    ORGEO_DAY_MARKER,
     ORGEO_TABLES_DELIMITER,
     _extract_group_urls,
     _extract_header_url,
@@ -12,8 +13,51 @@ from protocols.services.orgeo_browser import (
     _fetch_orgeo_meta,
     fetch_orgeo_tables,
     fetch_orgeo_with_browser,
+    orgeo_chunk_days,
     resolve_orgeo_url,
 )
+
+
+def _group(name, sub_id=None):
+    """Таблица группы Orgeo; у личных групп команда — ссылка с номером дня s=."""
+    team = (
+        f"<a href='/online/finish/53967?s={sub_id}&tz=3&t=г. Москва'>г. Москва</a>"
+        if sub_id else 'г. Москва'
+    )
+    return f'<h2>Группа {name}</h2><table><tr><td>1</td><td>Иванов Иван</td><td>{team}</td></tr></table>'
+
+
+class ChunkDaysTests(SimpleTestCase):
+    """День каждой таблицы группы: по метке, по ссылкам s= или по соседям."""
+
+    def test_marker_wins(self):
+        chunks = [ORGEO_DAY_MARKER.format('7') + _group('Ж12'), ORGEO_DAY_MARKER.format('9') + _group('Ж12')]
+        self.assertEqual(orgeo_chunk_days(chunks), [1, 2])
+
+    def test_days_from_team_links(self):
+        chunks = [_group('Ж12', 2), _group('М12', 2), _group('Ж12', 3), _group('М12', 3)]
+        self.assertEqual(orgeo_chunk_days(chunks), [1, 1, 2, 2])
+
+    def test_relay_day_without_links_between_days(self):
+        # Волгоград: классика (s=2), лонг (s=3), эстафета без ссылок (s=4), ВС (s=5).
+        chunks = [
+            _group('Ж18', 2), _group('М20', 2), _group('Ж18', 3), _group('М20', 3),
+            _group('Ж18'), _group('М20'), _group('Ж18', 5), _group('М20', 5),
+        ]
+        self.assertEqual(
+            orgeo_chunk_days(chunks, ['2', '3', '4', '5']), [1, 1, 2, 2, 3, 3, 4, 4]
+        )
+
+    def test_relay_groups_and_linked_groups_on_same_day(self):
+        # Зеленоград: в день эстафеты (s=4) часть групп без ссылок, часть — со ссылками.
+        chunks = [
+            _group('Девушки до 15 лет', 3), _group('ДФ-Ж10', 3),
+            _group('Девушки до 15 лет'), _group('ДФ-Ж10', 4),
+        ]
+        self.assertEqual(orgeo_chunk_days(chunks, ['2', '3', '4']), [1, 1, 2, 2])
+
+    def test_single_day_without_links(self):
+        self.assertEqual(orgeo_chunk_days([_group('МЖ12'), _group('МЖ14')]), [1, 1])
 
 
 class DelimiterConstantTests(SimpleTestCase):
@@ -243,6 +287,8 @@ class FetchOrgeoTablesTests(SimpleTestCase):
         self.assertIsNone(err)
         self.assertEqual(len(tables), 1)
         self.assertIn('Фамилия', tables[0])
+        # Перед таблицей — метка дня, чтобы каждый день был отдельным стартом.
+        self.assertTrue(tables[0].startswith(ORGEO_DAY_MARKER.format('2')))
 
     @patch('protocols.services.orgeo_browser._make_session')
     @patch('protocols.services.orgeo_browser.resolve_orgeo_url')

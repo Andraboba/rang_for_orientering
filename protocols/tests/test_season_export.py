@@ -287,6 +287,21 @@ class PointsFormulaSheetTests(TestCase):
         self.assertEqual(ws['A4'].value, '=RANK(C4,$C$4:$C$5)')
         self.assertEqual(ws['D4'].value, '=COUNT(E4:F4)')
 
+    def test_each_day_of_multiday_protocol_is_a_start(self):
+        multiday = make_protocol(event_date=date(2026, 9, 20), title='Первенство России')
+        make_result(multiday, last_name='Петров', first_name='Пётр', points=700, day=1)
+        make_result(multiday, last_name='Петров', first_name='Пётр', points=600, day=2)
+        content = export_season_excel_by_date_range(date(2026, 9, 1), date(2026, 9, 30))
+        workbook = load_workbook(BytesIO(content))
+        ws = workbook['Баллы']
+        self.assertEqual(ws['B1'].value, 4)  # два однодневных старта + два дня первенства
+        self.assertEqual(ws['G3'].value, '20.09 Первенство России — день 1')
+        self.assertEqual(ws['H3'].value, '20.09 Первенство России — день 2')
+        petrov = next(row for row in ws.iter_rows(min_row=4) if row[1].value == 'Петров Пётр')
+        self.assertEqual([cell.value for cell in petrov[4:8]], [None, 900, 700, 600])
+        places_header = [cell.value for cell in workbook['Места'][1]]
+        self.assertIn('Первенство России — день 2 — место', places_header)
+
     def test_veterans_sheet_has_formulas_too(self):
         make_known_participant(last_name='Петров', first_name='Пётр', veteran=True)
         content = export_season_excel_by_date_range(date(2026, 9, 1), date(2026, 9, 30))

@@ -158,6 +158,7 @@ def protocol_detail(request, pk):
             ProtocolResult.objects.create(
                 protocol=protocol,
                 group_name=r.get('group_name', ''),
+                day=r.get('day', 1),
                 place=r.get('place', ''),
                 place_out_of=r.get('place_out_of'),
                 last_name=r['last_name'],
@@ -228,6 +229,7 @@ def protocol_detail(request, pk):
                 ProtocolResult.objects.create(
                     protocol=protocol,
                     group_name=r.get('group_name', ''),
+                    day=r.get('day', 1),
                     place=r.get('place', ''),
                     place_out_of=r.get('place_out_of'),
                     last_name=r['last_name'],
@@ -272,6 +274,8 @@ def protocol_detail(request, pk):
             'kind': kind,
             # Перепарсить «всех подряд» можно везде, кроме скана PDF.
             'can_show_all': not is_pdf and not is_winorient,
+            # Многодневка: каждый день — отдельный старт, показываем номер дня.
+            'show_day': protocol.results.values('day').distinct().count() > 1,
             'date_form': date_form,
             'show_date_form': show_date_form,
         },

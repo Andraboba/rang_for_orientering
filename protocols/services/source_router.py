@@ -20,6 +20,7 @@ from .orgeo_browser import (
     ORGEO_TABLES_DELIMITER,
     fetch_orgeo_tables,
     fetch_orgeo_with_browser,
+    orgeo_chunk_days,
     resolve_orgeo_url,
 )
 from .orgeo_parser import fetch_orgeo_document, parse_orgeo
@@ -264,11 +265,14 @@ def parse_payload(
         return parse_pdf_summary(raw, base_pairs=base_pairs, team_name=team_name)
 
     results: List[Dict] = []
-    for chunk in split_chunks(kind, raw):
+    chunks = split_chunks(kind, raw)
+    # У Orgeo в одном протоколе все дни многодневки; каждый день — отдельный старт.
+    days = orgeo_chunk_days(chunks) if kind == KIND_ORGEO else [1] * len(chunks)
+    for chunk, day in zip(chunks, days):
         if kind == KIND_ORGEO:
-            results.extend(
-                parse_orgeo(chunk, base_pairs=base_pairs, team_name=team_name)
-            )
+            for row in parse_orgeo(chunk, base_pairs=base_pairs, team_name=team_name):
+                row['day'] = day
+                results.append(row)
         elif kind == KIND_SPORTIDENT:
             results.extend(
                 parse_sportident(chunk, base_pairs=base_pairs, team_name=team_name)

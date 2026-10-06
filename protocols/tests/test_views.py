@@ -9,10 +9,10 @@ from django.test import TestCase
 from django.urls import reverse
 
 from protocols.models import Event, KnownParticipant, Protocol, ProtocolResult
-from protocols.services.pdf_summary_parser import PDF_SUMMARY_PREFIX
+from protocols.services.pdf_summary_parser import PDF_PART_DELIMITER, PDF_SUMMARY_PREFIX
 from protocols.services.source_router import KIND_PDF_SUMMARY, KIND_SPORTORG
 from protocols.services.sportorg_parser import SPORTORG_DATA_PREFIX, extract_race_b64
-from .test_pdf_summary_parser import OCLUB_POINTS_TEXT
+from .test_pdf_summary_parser import CLUB_CUP_STAGES_TEXT, OCLUB_POINTS_TEXT, SPORTORG_RELAY_TEXT
 from .test_sportorg_parser import _personal_race, _race_html
 from .factories import (
     make_championship_level,
@@ -442,6 +442,22 @@ class ClubOnlyParticipantProcessingTests(TestCase):
     def test_known_participants_page_shows_flag(self):
         resp = self.client.get(reverse('protocols:known_participants'))
         self.assertContains(resp, 'только за клуб')
+
+
+class ResultDayProcessingTests(TestCase):
+    """Номер дня многодневки сохраняется в результатах — в зачёте это разные старты."""
+
+    def test_days_of_pdf_parts_are_saved(self):
+        payload = (
+            PDF_SUMMARY_PREFIX + SPORTORG_RELAY_TEXT + PDF_PART_DELIMITER + CLUB_CUP_STAGES_TEXT
+        )
+        protocol = make_protocol(source_kind=KIND_PDF_SUMMARY, raw_html=payload)
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[protocol.pk]),
+            data={'team_name': '*', 'protocol_id': protocol.pk},
+        )
+        days = dict(protocol.results.values_list('group_name', 'day').distinct())
+        self.assertEqual(days, {'МЖ14': 1, '1 этап (М16, М45, Ж35)': 2})
 
 
 class SetProtocolTitleViewTests(TestCase):

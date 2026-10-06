@@ -64,8 +64,8 @@ class ProtocolAdmin(admin.ModelAdmin):
 
 @admin.register(ProtocolResult)
 class ProtocolResultAdmin(admin.ModelAdmin):
-    list_display = ('protocol', 'group_name', 'place', 'place_out_of', 'last_name', 'first_name', 'rank', 'points')
-    list_filter = ('protocol',)
+    list_display = ('protocol', 'day', 'group_name', 'place', 'place_out_of', 'last_name', 'first_name', 'rank', 'points')
+    list_filter = ('protocol', 'day')
     search_fields = ('last_name', 'first_name', 'rank')
 
 

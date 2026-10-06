@@ -37,10 +37,67 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from .orgeo_parser import _extract_group_from_h2
+
 logger = logging.getLogger(__name__)
 
 # Разделитель для хранения нескольких HTML в одном поле (все группы одного старта).
 ORGEO_TABLES_DELIMITER = "<!-- ORGEO_TABLE -->"
+
+# Метка дня (sub_id Orgeo) перед таблицей группы: в зачёте каждый день
+# многодневки — отдельный старт.
+ORGEO_DAY_MARKER = "<!-- ORGEO_DAY:{} -->"
+_DAY_MARKER_RE = re.compile(r"<!-- ORGEO_DAY:(\w+) -->")
+# В старых протоколах меток нет, но номер дня есть в ссылках на команды:
+# /online/finish/53967?s=2&tz=3&t=...
+_LINK_DAY_RE = re.compile(r"[?&]s=(\d+)")
+
+
+def _next_day_key(current: Optional[str], sub_ids: Optional[List[str]]) -> str:
+    """Следующий день после current по списку дней из API (или новый условный)."""
+    if sub_ids:
+        if current is None:
+            return sub_ids[0]
+        if current in sub_ids and sub_ids.index(current) + 1 < len(sub_ids):
+            return sub_ids[sub_ids.index(current) + 1]
+    return f"{current}+" if current else "1"
+
+
+def orgeo_chunk_day_keys(chunks: List[str], sub_ids: Optional[List[str]] = None) -> List[str]:
+    """
+    Номер дня Orgeo (sub_id) для каждой таблицы группы, в порядке загрузки:
+      1) метка ORGEO_DAY, которую ставит fetch_orgeo_tables;
+      2) иначе — параметр s= в ссылках на команды;
+      3) у таблиц без ссылок (эстафеты) — день предыдущей таблицы, а если эта
+         группа в нём уже была — следующий день из sub_ids (список дней из API).
+    """
+    keys: List[str] = []
+    current: Optional[str] = None
+    seen: set = set()
+    for chunk in chunks:
+        group = _extract_group_from_h2(chunk)
+        marker = _DAY_MARKER_RE.search(chunk)
+        links = _LINK_DAY_RE.findall(chunk)
+        key = marker.group(1) if marker else (links[0] if links else None)
+        if key is None:
+            if current is not None and group not in seen:
+                key = current
+            else:
+                key = _next_day_key(current, sub_ids)
+        if key != current:
+            current, seen = key, set()
+        seen.add(group)
+        keys.append(key)
+    return keys
+
+
+def orgeo_chunk_days(chunks: List[str], sub_ids: Optional[List[str]] = None) -> List[int]:
+    """Номер дня 1, 2, 3 … для каждой таблицы — по порядку появления дней."""
+    numbers: Dict[str, int] = {}
+    return [
+        numbers.setdefault(key, len(numbers) + 1)
+        for key in orgeo_chunk_day_keys(chunks, sub_ids)
+    ]
 
 # Таймаут на один HTTP-запрос (секунды)
 _REQUEST_TIMEOUT = 15
@@ -323,7 +380,7 @@ def fetch_orgeo_tables(url: str, timeout_ms: int = 30000) -> Tuple[Optional[List
                     sub_id, day["name"], day["date"],
                 )
                 tables, errs = _fetch_day_tables(event_id, sub_id, session)
-                all_collected.extend(tables)
+                all_collected.extend(ORGEO_DAY_MARKER.format(sub_id) + t for t in tables)
                 all_errors.extend(errs)
 
             if all_collected:

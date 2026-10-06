@@ -69,6 +69,7 @@ _DAY_HEADER_RE = re.compile(r"(?:\d+\s*день|День\s*\d+)", re.IGNORECASE)
 _TIME_RE = re.compile(r"\d{1,2}:\d{2}:\d{2}")
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 _DATE_RE = re.compile(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})")
+_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 # «16-20.06.2026» — диапазон дней многодневки.
 _DATE_RANGE_RE = re.compile(r"(\d{1,2})\s*[-–]\s*(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})")
 
@@ -554,13 +555,15 @@ def parse_pdf_summary(
         text = text.lstrip()[len(PDF_SUMMARY_PREFIX):]
 
     rows: List[Dict] = []
-    for part in text.split(PDF_PART_DELIMITER):
+    for part, day in zip(*_parts_with_days(text)):
         if _is_relay_text(part):
-            rows.extend(_parse_relay_rows(part))
+            part_rows = _parse_relay_rows(part)
         else:
             part_rows = _parse_rows(part)
             _score_rows(part_rows)
-            rows.extend(part_rows)
+        for row in part_rows:
+            row["day"] = day
+        rows.extend(part_rows)
 
     team_filter = (team_name or "").strip().lower()
     show_all = team_filter == "*"
@@ -604,9 +607,43 @@ def parse_pdf_summary(
                 "first_name": first_name,
                 "points": row["points"],
                 "raw_line": f"{place_part}, {last_name} {first_name}, очки:{row['points']}",
+                "day": row["day"],
             }
         )
     return results
+
+
+def _part_date(part: str) -> Optional[str]:
+    """
+    Дата из шапки части (дд.мм.гггг или гггг-мм-дд). Ищется только до строки
+    заголовка таблицы — ниже бывают даты рождения участников.
+    """
+    for line in part.splitlines():
+        if line.strip().startswith("№"):
+            break
+        m_date = _DATE_RE.search(line)
+        if m_date:
+            day, month, year = m_date.groups()
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+        m_iso = _ISO_DATE_RE.search(line)
+        if m_iso:
+            return m_iso.group(0)
+    return None
+
+
+def _parts_with_days(text: str) -> Tuple[List[str], List[int]]:
+    """
+    Части протокола и номер дня каждой. День определяется датой в шапке части:
+    два файла одного дня (Кубок клубов) — один старт, дни первенства — разные.
+    Часть без даты считается отдельным днём.
+    """
+    parts = text.split(PDF_PART_DELIMITER)
+    numbers: Dict[str, int] = {}
+    days = []
+    for index, part in enumerate(parts):
+        key = _part_date(part) or f"part-{index}"
+        days.append(numbers.setdefault(key, len(numbers) + 1))
+    return parts, days
 
 
 def fetch_pdf_summary(url: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:

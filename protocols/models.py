@@ -297,6 +297,14 @@ class ProtocolResult(models.Model):
         verbose_name='Протокол'
     )
     group_name = models.CharField('Группа (например Ж12, М14)', max_length=50, blank=True)
+    day = models.PositiveSmallIntegerField(
+        'День',
+        default=1,
+        help_text=(
+            'Номер дня многодневки внутри протокола (1, 2, 3 …). '
+            'В зачёте каждый день — отдельный старт.'
+        ),
+    )
     place = models.CharField('Место (или "снят")', max_length=20, blank=True)
     place_out_of = models.PositiveIntegerField('Место из N', null=True, blank=True)
     rank = models.CharField(

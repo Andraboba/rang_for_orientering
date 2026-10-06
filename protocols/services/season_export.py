@@ -156,22 +156,24 @@ def build_places_data(protocols, veterans_only=False):
     veterans_only=True  → только ветераны.
     Возвращает:
       - people_sorted: список участников
-      - data: {(last_name, first_name): {(protocol_id, start_idx): (place, out_of, rank)}}
-      - start_columns: [(protocol_obj, start_idx), ...] для заголовка Excel
+      - data: {(last_name, first_name): {(protocol_id, day): (place, out_of, rank)}}
+      - start_columns: [(protocol_obj, day), ...] для заголовка Excel
     """
     veteran_set = _veteran_name_pairs()
     excluded_set = excluded_name_pairs()
     protocol_ids = [p.id for p in protocols]
-    protocol_by_id = {p.id: p for p in protocols}
     split_by_group = _build_name_disambiguation(protocol_ids)
     results = (
         ProtocolResult.objects.filter(protocol_id__in=protocol_ids, team_member=True)
         .order_by('protocol_id', 'id')
-        .values('protocol_id', 'last_name', 'first_name', 'group_name', 'place', 'place_out_of', 'rank')
+        .values(
+            'protocol_id', 'day', 'last_name', 'first_name', 'group_name',
+            'place', 'place_out_of', 'rank',
+        )
     )
     people_set = set()
     by_person = defaultdict(dict)
-    seen_key_pid = set()
+    seen_key_start = set()
     for r in results:
         ln, fn = r['last_name'], r['first_name']
         name_key = (ln.strip().lower(), fn.strip().lower())
@@ -185,18 +187,36 @@ def build_places_data(protocols, veterans_only=False):
         need_split = split_by_group.get((ln, fn), False)
         key = _display_person_name(ln, fn, r.get('group_name'), need_split)
         people_set.add(key)
-        pid = r['protocol_id']
-        if (key, pid) in seen_key_pid:
+        start = (r['protocol_id'], r['day'])
+        if (key, start) in seen_key_start:
             continue
-        seen_key_pid.add((key, pid))
+        seen_key_start.add((key, start))
         place = r['place'] or ''
         place_out_of = r['place_out_of']
         place_out_of_str = str(place_out_of) if place_out_of is not None else ''
         rank = (r['rank'] or '').strip()
-        by_person[key][(pid, 1)] = (place, place_out_of_str, rank)
+        by_person[key][start] = (place, place_out_of_str, rank)
     people_sorted = sorted(people_set, key=lambda x: (x[0].lower(), x[1].lower()))
-    start_columns = [(protocol_by_id[p.id], 1) for p in protocols]
-    return people_sorted, dict(by_person), start_columns
+    return people_sorted, dict(by_person), build_start_columns(protocols)
+
+
+def build_start_columns(protocols):
+    """
+    Старты периода: [(протокол, день), ...] по порядку протоколов. Каждый день
+    многодневки — отдельный старт; протокол без результатов даёт одну колонку.
+    """
+    days_by_protocol = defaultdict(set)
+    for protocol_id, day in (
+        ProtocolResult.objects.filter(
+            protocol_id__in=[p.id for p in protocols], team_member=True
+        ).values_list('protocol_id', 'day').distinct()
+    ):
+        days_by_protocol[protocol_id].add(day)
+    return [
+        (p, day)
+        for p in protocols
+        for day in sorted(days_by_protocol.get(p.id) or {1})
+    ]
 
 
 def build_points_data(ranking, veterans_only=False):
@@ -224,8 +244,8 @@ def build_points_data(ranking, veterans_only=False):
 def build_points_matrix(protocols, veterans_only=False):
     """
     Взвешенные очки (ProtocolResult.points × коэффициент) по каждому старту:
-    {(фамилия, имя): {protocol_id: очки}}. Несколько результатов в одном
-    протоколе (дни многодневки, эстафета) складываются в один старт.
+    {(фамилия, имя): {(protocol_id, день): очки}}. Каждый день многодневки —
+    отдельный старт; несколько результатов одного дня складываются.
     veterans_only=False → только не-ветераны, True → только ветераны.
     """
     if not protocols:
@@ -255,7 +275,7 @@ def build_points_matrix(protocols, veterans_only=False):
             continue
         need_split = split_by_group.get((ln, fn), False)
         person_key = _display_person_name(ln, fn, r.group_name, need_split)
-        per_start[person_key][r.protocol_id] += float(r.weighted_points)
+        per_start[person_key][(r.protocol_id, r.day)] += float(r.weighted_points)
     return {person: dict(starts) for person, starts in per_start.items()}
 
 
@@ -366,8 +386,13 @@ def _write_points_formula_sheet(ws, protocols, veterans_only=False, max_starts=N
     итог — формула «сумма лучших N стартов», N — в ячейке B1. Места считаются
     формулой RANK, поэтому при смене N итог и места пересчитываются сами;
     строки отсортированы по итогу для N, заданного при выгрузке.
+    Каждый день многодневки — отдельный старт и отдельный столбец.
     """
-    total_starts = len(protocols)
+    start_columns = build_start_columns(protocols)
+    days_per_protocol = defaultdict(int)
+    for p, _day in start_columns:
+        days_per_protocol[p.id] += 1
+    total_starts = len(start_columns)
     default_n = min(max_starts, total_starts) if max_starts else total_starts
     per_start = build_points_matrix(protocols, veterans_only=veterans_only)
     totals = _best_starts_totals(per_start, default_n)
@@ -389,10 +414,11 @@ def _write_points_formula_sheet(ws, protocols, veterans_only=False, max_starts=N
     first_col = _POINTS_FIRST_COLUMN
     last_col = first_col + max(total_starts, 1) - 1
     header = ['Место', 'Участник', f'="Баллы (лучшие "&{starts_cell}&")"', 'Стартов']
-    for p in protocols:
+    for p, day in start_columns:
         event_date = (p.event.date if p.event else None) or p.event_date
         prefix = f'{event_date:%d.%m} ' if event_date else ''
-        header.append(f'{prefix}{_protocol_display_title(p)}')
+        suffix = f' — день {day}' if days_per_protocol[p.id] > 1 else ''
+        header.append(f'{prefix}{_protocol_display_title(p)}{suffix}')
     # Строка 2 — отступ между настройкой и таблицей.
     for col, title in enumerate(header, start=1):
         cell = ws.cell(row=_POINTS_HEADER_ROW, column=col, value=title)
@@ -408,8 +434,8 @@ def _write_points_formula_sheet(ws, protocols, veterans_only=False, max_starts=N
         ws.cell(row=row, column=2, value=f'{person[0]} {person[1]}')
         ws.cell(row=row, column=3, value=_best_n_formula(values_first, values_last, starts_cell))
         ws.cell(row=row, column=4, value=f'=COUNT({values_first}:{values_last})')
-        for offset, p in enumerate(protocols):
-            points = per_start[person].get(p.id)
+        for offset, (p, day) in enumerate(start_columns):
+            points = per_start[person].get((p.id, day))
             if points is not None:
                 ws.cell(row=row, column=first_col + offset, value=round(points, 2))
         for col in [3] + list(range(first_col, last_col + 1)):

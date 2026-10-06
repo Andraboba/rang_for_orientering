@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from protocols.services.orgeo_browser import ORGEO_TABLES_DELIMITER
+from protocols.services.orgeo_browser import ORGEO_DAY_MARKER, ORGEO_TABLES_DELIMITER
 from protocols.services.pdf_summary_parser import PDF_SUMMARY_PREFIX
 from protocols.services.source_router import (
     KIND_ORGEO,
@@ -211,6 +211,19 @@ class ParsePayloadTests(SimpleTestCase):
         )
         raw = ORGEO_TABLES_DELIMITER.join([chunk, chunk])
         self.assertEqual(len(split_chunks(KIND_ORGEO, raw)), 2)
+
+    def test_orgeo_results_get_day_of_their_table(self):
+        chunk = (
+            '<h2>Группа М12</h2><table>'
+            '<tr><th>П/п</th><th>№</th><th>Фамилия, имя</th><th>Команда</th><th>Результат</th></tr>'
+            '<tr><td>1</td><td>101</td><td>Иванов Иван</td><td>СК Фотон</td><td>00:20:00</td></tr>'
+            '</table>'
+        )
+        raw = ORGEO_TABLES_DELIMITER.join(
+            [ORGEO_DAY_MARKER.format('2') + chunk, ORGEO_DAY_MARKER.format('3') + chunk]
+        )
+        rows = parse_payload(KIND_ORGEO, raw, base_pairs=[], team_name='Фотон')
+        self.assertEqual([r['day'] for r in rows], [1, 2])
 
     def test_winorient_uses_format_flag(self):
         rows = parse_payload(
