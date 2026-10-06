@@ -10,6 +10,14 @@
   2) o-club.ru («СУММА 4-х дней», «СУММА»):
      № Фамилия, имя  Коллектив  ГР  Разряд  Номер  Сумма  Место  День 1 …
 
+Кроме сумм разбираются и PDF одного старта (WinOrient/SportOrg):
+
+  3) личный протокол — колонка «Результат» вместо «Сумма», группа задаётся
+     строкой «Ж14, 23 КП, 4.3 км» или этапом клубной эстафеты «1этап (М16, М45)»;
+
+  4) эстафета SportOrg — строка с номером команды, под ней по строке на этап,
+     колонки «Результат» (этап) и «Ком.рез-т» (время команды).
+
 Колонки в тексте PDF выровнены пробелами, поэтому строки режутся по границам,
 взятым из строки заголовка таблицы, — это надёжнее регулярных выражений,
 т.к. и коллектив, и фамилия могут содержать пробелы, цифры и запятые.
@@ -33,6 +41,10 @@ from urllib.request import Request, urlopen
 
 PDF_SUMMARY_PREFIX = "<!--PDF_SUMMARY_TEXT-->"
 
+# Несколько PDF одного старта (два файла Кубка клубов, дни первенства)
+# хранятся в одном протоколе через этот разделитель и разбираются по отдельности.
+PDF_PART_DELIMITER = "<!--PDF_PART-->"
+
 _ALLOWED_URL_SCHEMES = ("http", "https")
 
 # Ключевые слова заголовка таблицы → логическое имя колонки.
@@ -45,6 +57,8 @@ _COLUMN_KEYWORDS = (
     ("Номер", "bib"),
     ("номер", "bib"),
     ("Сумма", "total"),
+    # Одиночный протокол: вместо суммы — результат дня.
+    ("Результат", "total"),
     ("Место", "place"),
     ("ГР", "year"),
 )
@@ -65,6 +79,16 @@ _GROUP_RE = re.compile(r"^[A-ZА-ЯЁa-zа-яё][\wА-Яа-яЁё\-*+/]{0,11}$")
 _NOT_GROUP_WORDS = {
     "сумма", "место", "код", "итого", "стр", "страница", "кв", "результаты",
 }
+
+# Заголовок группы одиночного протокола: «Ж14, 23 КП, 4.3 км», «Новички, 6 КП, 0,9 км».
+_COURSE_GROUP_RE = re.compile(r"^\s*([^,]{1,30}?),\s*\d+\s*КП\b", re.IGNORECASE)
+# Этап клубной эстафеты, у которого свои места: «1этап (М16, М45, Ж35)».
+_STAGE_GROUP_RE = re.compile(r"^\s*(\d+)\s*этап\b\s*(.*?)\s*$", re.IGNORECASE)
+
+# Эстафета SportOrg: в заголовке есть колонка с временем команды.
+_RELAY_HEADER_RE = re.compile(r"Ком\.?\s*рез", re.IGNORECASE)
+_BIRTH_DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+_TEAM_NUMBER_RE = re.compile(r"^\d+$")
 
 # Служебные строки шапки, которые не идут в название протокола.
 _META_LINE_RE = re.compile(r"^(?:код\s+дисциплины|кв\s*[-—]|главный|секретарь|судья)", re.IGNORECASE)
@@ -214,6 +238,21 @@ def _is_group_line(line: str) -> bool:
     return bool(_GROUP_RE.match(stripped))
 
 
+def _heading_group(line: str) -> Optional[str]:
+    """
+    Группа из заголовка одиночного протокола:
+    «Ж14, 23 КП, 4.3 км» → «Ж14», «1этап (М16, М45, Ж35)» → «1 этап (М16, М45, Ж35)».
+    """
+    m_stage = _STAGE_GROUP_RE.match(line)
+    if m_stage:
+        number, rest = m_stage.groups()
+        return f"{number} этап {rest}".strip()
+    m_course = _COURSE_GROUP_RE.match(line)
+    if m_course:
+        return m_course.group(1).strip()
+    return None
+
+
 def extract_summary_meta(text: str) -> Tuple[str, Optional[str]]:
     """
     Название протокола и дата (YYYY-MM-DD) из шапки PDF.
@@ -226,7 +265,7 @@ def extract_summary_meta(text: str) -> Tuple[str, Optional[str]]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith("№") or _is_group_line(stripped):
+        if stripped.startswith("№") or _is_group_line(stripped) or _heading_group(stripped):
             break
         if not event_date:
             m_range = _DATE_RANGE_RE.search(stripped)
@@ -257,6 +296,7 @@ def _parse_rows(text: str) -> List[Dict]:
     """
     columns: Optional[Dict[str, Tuple[int, int]]] = None
     total_in_points = False
+    single_result = False
     group_name = ""
     rows: List[Dict] = []
 
@@ -268,9 +308,17 @@ def _parse_rows(text: str) -> List[Dict]:
             found = _find_columns(line)
             if found:
                 columns = found
+                total_header = _cell(line, columns.get("total")).lower()
                 # «Сумма(Очков)» — в колонке суммы стоят очки, а не только время.
-                total_header = _cell(line, columns.get("total"))
-                total_in_points = "очк" in total_header.lower()
+                total_in_points = "очк" in total_header
+                # Протокол одного старта: в колонке только время или статус
+                # («п.п.3.13.12.2» — номер пункта правил, а не очки).
+                single_result = total_header.startswith("результат")
+            continue
+
+        heading = _heading_group(line)
+        if heading:
+            group_name = heading
             continue
 
         if _is_group_line(line):
@@ -287,12 +335,16 @@ def _parse_rows(text: str) -> List[Dict]:
             continue
         last_name, first_name = name
 
-        total_raw = _cell(line, columns.get("total"))
+        # Время в данных выровнено по правому краю и может начинаться
+        # левее заголовка «Результат».
+        total_raw = _cell(line, columns.get("total"), slack=2 if single_result else 0)
         total_sec = _seconds(total_raw)
         total_points: Optional[float] = None
         total_days: Optional[int] = None
         m_brackets = re.search(r"\(([^)]*)\)", total_raw)
-        if total_in_points:
+        if single_result:
+            pass
+        elif total_in_points:
             # Формат «02:03:58 (419.4)»: очки — в скобках.
             total_points = _number(m_brackets.group(1)) if m_brackets else None
         elif total_sec is not None:
@@ -303,18 +355,143 @@ def _parse_rows(text: str) -> List[Dict]:
             total_points = _number(total_raw)
 
         place = _cell(line, columns.get("place")) or _cell(line, columns.get("num"))
+        place = _int_prefix(place) or "-"
+        if single_result and total_sec is None:
+            place = "снят"
         rows.append(
             {
                 "group_name": group_name,
-                "place": _int_prefix(place) or "-",
+                "place": place,
                 "last_name": last_name,
                 "first_name": first_name,
                 "team": _cell(line, columns.get("team")),
                 "total_points": total_points,
                 "total_sec": total_sec,
                 "total_days": total_days,
+                "is_sum": not single_result,
             }
         )
+    return rows
+
+
+def _is_relay_text(text: str) -> bool:
+    return any(
+        line.strip().startswith("№") and _RELAY_HEADER_RE.search(line)
+        for line in (text or "").splitlines()
+    )
+
+
+def _relay_leg(line: str) -> Optional[Dict]:
+    """
+    Строка этапа эстафеты SportOrg:
+    «Никольский Михаил Павлович  Москва  I  1409 04.03.2012 00:09:05  00:09:05  1  0».
+    После даты рождения: время этапа, время команды, у первого этапа — место и очки.
+    Вместо времени бывает статус: «Непр. отметка», «ДИСКВ.», «п.п.3.13.12.2».
+    Строки этапов идут с отступом — так они отличаются от колонтитула страницы
+    «ПО SportOrg … 02.10.2026 22:09:22», где тоже есть дата.
+    """
+    if not line[:1].isspace():
+        return None
+    tokens = line.split()
+    date_idx = next((i for i, t in enumerate(tokens) if _BIRTH_DATE_RE.match(t)), None)
+    if date_idx is None:
+        return None
+    name = _split_name(" ".join(tokens[:date_idx]))
+    if not name:
+        return None
+
+    after = tokens[date_idx + 1:]
+    time_idx = [i for i, t in enumerate(after) if _TIME_RE.fullmatch(t)]
+    place = ""
+    if len(time_idx) >= 2:
+        place = next((t for t in after[time_idx[1] + 1:] if t.isdigit()), "")
+    finished = len(time_idx) >= 2 and all(
+        _TIME_RE.fullmatch(t) or t.isdigit() for t in after
+    )
+    return {
+        "last_name": name[0],
+        "first_name": name[1],
+        "team": line,
+        "team_sec": _seconds(after[time_idx[1]]) if len(time_idx) >= 2 else None,
+        "place": place,
+        "finished": finished,
+    }
+
+
+def _relay_leader(times: List[Optional[int]], places: List[str]) -> Optional[int]:
+    """Время команды-победителя; если 1-го места нет — лучшее время полной команды."""
+    for t_team, place in zip(times, places):
+        if place == "1" and t_team:
+            return t_team
+    return min((t for t in times if t), default=None)
+
+
+def _parse_relay_rows(text: str) -> List[Dict]:
+    """
+    Эстафета SportOrg. Команда засчитана, если все этапы пробежаны без снятия;
+    все её участники получают очки по времени команды на последнем этапе.
+    Возвращает строки в формате _parse_rows с уже проставленными очками.
+    """
+    group_name = ""
+    teams: List[Tuple[str, List[Dict]]] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("№"):
+            continue
+        if _is_group_line(stripped):
+            group_name = stripped
+            continue
+        if _TEAM_NUMBER_RE.match(stripped):
+            teams.append((group_name, []))
+            continue
+        if teams:
+            leg = _relay_leg(line)
+            if leg:
+                teams[-1][1].append(leg)
+
+    by_group: Dict[str, List[List[Dict]]] = {}
+    for group, legs in teams:
+        if legs:
+            by_group.setdefault(group, []).append(legs)
+
+    rows: List[Dict] = []
+    for group, group_teams in by_group.items():
+        # Неполная команда (вышли не все участники) не финишировала,
+        # даже если пробежанные этапы без снятий.
+        full_legs = max(len(legs) for legs in group_teams)
+
+        def team_time(legs: List[Dict]) -> Optional[int]:
+            if len(legs) < full_legs or not all(leg["finished"] for leg in legs):
+                return None
+            return legs[-1]["team_sec"]
+
+        times = [team_time(legs) for legs in group_teams]
+        places = [next((leg["place"] for leg in legs if leg["place"]), "") for legs in group_teams]
+        leader = _relay_leader(times, places)
+        for legs, t_team, place in zip(group_teams, times, places):
+            points = _calc_points(t_team, leader) if t_team and place and leader else 0
+            seen = set()
+            for leg in legs:
+                key = (leg["last_name"].lower(), leg["first_name"].lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                if t_team:
+                    place_display = place or "в/к"
+                else:
+                    place_display = "снят"
+                rows.append(
+                    {
+                        "group_name": group,
+                        "place": place_display,
+                        "place_out_of": len(group_teams),
+                        "last_name": leg["last_name"],
+                        "first_name": leg["first_name"],
+                        "team": leg["team"],
+                        "points": points,
+                        "is_relay": True,
+                    }
+                )
     return rows
 
 
@@ -376,8 +553,14 @@ def parse_pdf_summary(
     if text.lstrip().startswith(PDF_SUMMARY_PREFIX):
         text = text.lstrip()[len(PDF_SUMMARY_PREFIX):]
 
-    rows = _parse_rows(text)
-    _score_rows(rows)
+    rows: List[Dict] = []
+    for part in text.split(PDF_PART_DELIMITER):
+        if _is_relay_text(part):
+            rows.extend(_parse_relay_rows(part))
+        else:
+            part_rows = _parse_rows(part)
+            _score_rows(part_rows)
+            rows.extend(part_rows)
 
     team_filter = (team_name or "").strip().lower()
     show_all = team_filter == "*"
@@ -408,6 +591,10 @@ def parse_pdf_summary(
         place = row["place"]
         place_out_of = row["place_out_of"]
         place_part = f"{place} из {place_out_of}" if place_out_of else place
+        if row.get("is_relay"):
+            place_part += " (эстафета)"
+        elif row.get("is_sum", True):
+            place_part += " (сумма)"
         results.append(
             {
                 "group_name": row["group_name"],
@@ -416,10 +603,7 @@ def parse_pdf_summary(
                 "last_name": last_name,
                 "first_name": first_name,
                 "points": row["points"],
-                "raw_line": (
-                    f"{place_part} (сумма), {last_name} {first_name}, "
-                    f"очки:{row['points']}"
-                ),
+                "raw_line": f"{place_part}, {last_name} {first_name}, очки:{row['points']}",
             }
         )
     return results
@@ -440,9 +624,9 @@ def fetch_pdf_summary(url: str) -> Tuple[Optional[str], Optional[str], Optional[
     if err or not text:
         return None, None, None, err or "PDF без текста."
 
-    if not _parse_rows(text):
+    if not parse_pdf_summary(text, base_pairs=[], team_name="*"):
         return None, None, None, (
-            "В PDF не найдена таблица с колонкой «Сумма» — "
+            "В PDF не найдена таблица с колонкой «Сумма» или «Результат» — "
             "этот вид протокола пока не поддерживается."
         )
 

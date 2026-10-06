@@ -148,6 +148,95 @@ class ParseOrgeoTests(SimpleTestCase):
         self.assertTrue(all(x['place_out_of'] == 3 for x in r))
 
 
+# Первенство России, Волгоград: между «Командой» и результатом стоит колонка
+# «Онлайн-КП», а сам результат называется «FINISH».
+ORGEO_ONLINE_KP_HTML = """
+<h2>Группа Ж18</h2>
+<table cellspacing=0>
+<tr><th>П/п</th><th>№</th><th>Фамилия, имя</th><th>Команда</th><th>Онлайн-КП</th><th>FINISH</th><th>Отставан</th><th>Место</th><th>Старт</th></tr>
+<tr><td>1</td><td>163</td><td>Петрова Дарья</td><td><a href='/online/finish/53967?s=2&tz=3&t=Краснодарский край'>Краснодарский край</a></td><td></td><td class=b>00:35:56</td><td align=right>+00:00</td><td>1</td><td align=right>11:03:00</td></tr>
+<tr><td>10</td><td>159</td><td>Повышева Анастасия</td><td><a href='/online/finish/53967?s=2&tz=3&t=г. Москва'>г. Москва</a></td><td></td><td class=b>00:41:26</td><td align=right>+05:30</td><td>10</td><td align=right>10:59:00</td></tr>
+</table>
+"""
+
+ORGEO_ONLINE_KP_RELAY_HTML = """
+<h2>Группа Ж18</h2>
+<table cellspacing=0>
+<tr><th>П/п</th><th>№</th><th>Фамилия, имя</th><th>Команда</th><th>Онлайн-КП</th><th>FINISH</th><th>Отставан</th><th>Старт</th></tr>
+<tr><th colspan=8 class=relay></th></tr>
+<tr><td>1</td><td>77.1</td><td>Евсикова Кристина</td><td>Московская обл.</td><td></td><td class=b>00:27:06</td><td align=right></td><td align=right>10:15:00</td></tr>
+<tr><td>1</td><td>77.2</td><td>Олейниченкова Анна</td><td>Московская обл.</td><td></td><td class=b>00:55:24</td><td align=right></td><td align=right>10:15:00</td></tr>
+<tr><td>1</td><td>77.3</td><td>Олейниченкова Светлана</td><td>Московская обл.</td><td></td><td class=b>01:21:41</td><td align=right>+00:00</td><td align=right>10:15:00</td></tr>
+<tr><th colspan=8 class=relay></th></tr>
+<tr><td>9</td><td>75.1</td><td>Банникова Ксения</td><td>г. Москва</td><td></td><td class=b>00:28:32</td><td align=right></td><td align=right>10:15:00</td></tr>
+<tr><td>9</td><td>75.2</td><td>Петрухина Мария</td><td>г. Москва</td><td></td><td class=b>01:11:41</td><td align=right></td><td align=right>10:15:00</td></tr>
+<tr><td>9</td><td>75.3</td><td>Повышева Анастасия</td><td>г. Москва</td><td></td><td class=b>01:37:17</td><td align=right>+15:36</td><td align=right>10:15:00</td></tr>
+</table>
+"""
+
+# Кросс-эстафета, Москва: колонки «Место» нет, П/п — порядковый номер.
+# Команда 5 снята за непр. отметку на третьем этапе, хотя последний этап
+# финишировал быстрее лидера.
+ORGEO_RELAY_DSQ_HTML = """
+<h2>Группа МЖ20</h2>
+<table cellspacing=0>
+<tr><th>П/п</th><th>№</th><th>Фамилия, имя</th><th>Команда</th><th>Результат</th><th>Отставан</th><th>Старт</th></tr>
+<tr><th colspan=8 class=relay></th></tr>
+<tr><td>1</td><td>1104</td><td>Рубени Даниил</td><td>МосКомпас</td><td class=b>00:19:54,0</td><td align=right></td><td align=right>11:35:00</td></tr>
+<tr><td>1</td><td>2104</td><td>Николич Никита</td><td>МосКомпас</td><td class=b>00:44:28,0</td><td align=right></td><td align=right>11:54:54</td></tr>
+<tr><td>1</td><td>3104</td><td>Марченко Нина</td><td>О-Фрязино</td><td class=b>01:08:03,0</td><td align=right></td><td align=right>12:19:28</td></tr>
+<tr><td>1</td><td>4104</td><td>Вдовина Софья</td><td>О-Фрязино</td><td class=b>01:29:49,0</td><td align=right>+00:00</td><td align=right>12:43:03</td></tr>
+<tr><th colspan=8 class=relay></th></tr>
+<tr><td>4</td><td>1105</td><td>Пахнин Игорь</td><td>МОСКОМПАС-ОРИЕНТА</td><td class=b>00:21:17,0</td><td align=right></td><td align=right>11:35:00</td></tr>
+<tr><td>4</td><td>2105</td><td>Редькин Роман</td><td>МОСКОМПАС-ОРИЕНТА</td><td class=b>00:43:25,0</td><td align=right></td><td align=right>11:56:17</td></tr>
+<tr><td>4</td><td>3105</td><td>Парыгина Елизавета</td><td>МОСКОМПАС-ОРИЕНТА</td><td class=b>01:07:41,0</td><td align=right></td><td align=right>12:18:25</td></tr>
+<tr><td>4</td><td>4105</td><td>Неяглова Алина</td><td>МОСКОМПАС-ОРИЕНТА</td><td class=b>01:33:22,0</td><td align=right>+03:33</td><td align=right>12:42:41</td></tr>
+<tr><th colspan=8 class=relay></th></tr>
+<tr><td>5</td><td>1103</td><td>Юрчук Андрей</td><td>СК Фотон</td><td class=b>00:20:37,0</td><td align=right></td><td align=right>11:35:00</td></tr>
+<tr><td>5</td><td>2103</td><td>Соколов Егор</td><td>СК Фотон</td><td class=b>00:42:39,0</td><td align=right></td><td align=right>11:55:37</td></tr>
+<tr><td>5</td><td>3103</td><td>Хохлова Екатерина</td><td>Ориента-СКРУМ</td><td class=b>непр.отмет.</td><td align=right></td><td align=right>12:17:39</td></tr>
+<tr><td>5</td><td>4103</td><td>Тайманова Светлана</td><td>Ориента-СКРУМ</td><td class=b>01:28:25,0</td><td align=right></td><td align=right>12:41:24</td></tr>
+</table>
+"""
+
+
+class ColumnsFromHeaderTests(SimpleTestCase):
+    """Номера колонок берутся из заголовка таблицы, а не по умолчанию."""
+
+    def test_finish_column_after_online_kp(self):
+        r = parse_orgeo(ORGEO_ONLINE_KP_HTML, base_pairs=[('Повышева', 'Анастасия')])
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]['place'], '10')
+        # (2 - 41:26 / 35:56) * 1000
+        self.assertEqual(r[0]['points'], 846)
+        self.assertEqual(r[0]['group_name'], 'Ж18')
+
+    def test_relay_total_time_from_finish_column(self):
+        r = parse_orgeo(ORGEO_ONLINE_KP_RELAY_HTML, base_pairs=[('Повышева', 'Анастасия')])
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]['place'], '9')
+        # (2 - 1:37:17 / 1:21:41) * 1000
+        self.assertEqual(r[0]['points'], 809)
+
+
+class RelayDisqualificationTests(SimpleTestCase):
+    def test_team_with_mispunched_leg_gets_no_points(self):
+        r = parse_orgeo(ORGEO_RELAY_DSQ_HTML, base_pairs=[], team_name='Фотон')
+        self.assertEqual(
+            {(x['last_name'], x['points']) for x in r},
+            {('Юрчук', 0), ('Соколов', 0)},
+        )
+        self.assertTrue(all(x['place'] == 'непр.отмет.' for x in r))
+
+    def test_valid_teams_are_scored_by_team_time(self):
+        r = parse_orgeo(ORGEO_RELAY_DSQ_HTML, base_pairs=[], team_name='*')
+        points = {x['last_name']: x['points'] for x in r}
+        self.assertEqual(points['Рубени'], 1000)
+        # (2 - 1:33:22 / 1:29:49) * 1000
+        self.assertEqual(points['Неяглова'], 960)
+        self.assertEqual(points['Тайманова'], 0)
+
+
 class FetchOrgeoDocumentTests(SimpleTestCase):
     @patch('protocols.services.orgeo_parser.fetch_url')
     def test_no_iframe(self, mock_fetch):

@@ -188,9 +188,10 @@ def protocol_detail(request, pk):
             team_name = (form.cleaned_data.get('team_name') or '').strip()
 
             # Список уже известных участников (СК Фотон и др.).
-            # Помеченных «не учитывать никогда» не ищем вовсе.
+            # Помеченных «не учитывать никогда» не ищем вовсе, а «только за клуб»
+            # находятся лишь по названию команды, не по базе.
             base_pairs = list(
-                KnownParticipant.objects.filter(excluded=False)
+                KnownParticipant.objects.filter(excluded=False, club_only=False)
                 .values_list('last_name', 'first_name')
             )
             excluded_pairs = excluded_name_pairs()
@@ -587,9 +588,11 @@ def load_pdf_protocol(request):
         return redirect('protocols:home')
 
     # База известных участников для автоматической отметки team_member=True.
+    # Клуба в скане не видно, поэтому «только за клуб» здесь не отмечаем.
     known = {
         (ln.strip().lower(), fn.strip().lower())
-        for ln, fn in KnownParticipant.objects.values_list('last_name', 'first_name')
+        for ln, fn in KnownParticipant.objects.filter(club_only=False)
+        .values_list('last_name', 'first_name')
     }
 
     base_title = title_override or parsed.title or pdf_file.name

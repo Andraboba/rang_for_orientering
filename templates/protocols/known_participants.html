@@ -7,7 +7,7 @@
         <p class="meta">
             Список уже учтённых участников (дубли не показываются при обработке).
             Всего: {{ participants|length }}{% if excluded_count %}, из них не учитываются: {{ excluded_count }}{% endif %}.
-            Флаги «Ветеран» и «Не учитывать никогда» меняются в админке.
+            Флаги «Ветеран», «Не учитывать никогда» и «Только за клуб» меняются в админке.
         </p>
         {% if participants %}
             <table>
@@ -29,6 +29,7 @@
                             {% if p.excluded %}не учитывается
                             {% elif p.veteran %}ветеран
                             {% else %}основной{% endif %}
+                            {% if p.club_only and not p.excluded %} · только за клуб{% endif %}
                         </td>
                     </tr>
                     {% endfor %}

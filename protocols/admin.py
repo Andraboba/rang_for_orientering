@@ -71,11 +71,19 @@ class ProtocolResultAdmin(admin.ModelAdmin):
 
 @admin.register(KnownParticipant)
 class KnownParticipantAdmin(admin.ModelAdmin):
-    list_display = ('last_name', 'first_name', 'group_name', 'group_filter', 'split_by_group', 'veteran', 'excluded')
-    list_filter = ('veteran', 'excluded', 'split_by_group')
-    list_editable = ('group_name', 'group_filter', 'split_by_group', 'veteran', 'excluded')
+    list_display = (
+        'last_name', 'first_name', 'group_name', 'group_filter', 'split_by_group',
+        'club_only', 'veteran', 'excluded',
+    )
+    list_filter = ('veteran', 'excluded', 'club_only', 'split_by_group')
+    list_editable = (
+        'group_name', 'group_filter', 'split_by_group', 'club_only', 'veteran', 'excluded',
+    )
     search_fields = ('last_name', 'first_name', 'group_name')
-    actions = ['mark_as_veteran', 'unmark_veteran', 'mark_as_excluded', 'unmark_excluded']
+    actions = [
+        'mark_as_veteran', 'unmark_veteran', 'mark_as_excluded', 'unmark_excluded',
+        'mark_as_club_only', 'unmark_club_only',
+    ]
 
     fieldsets = (
         (None, {
@@ -88,6 +96,14 @@ class KnownParticipantAdmin(admin.ModelAdmin):
                 'возрастной группы, укажите группы этого участника через запятую: '
                 '«М21+» — все группы М от 21 и старше, либо точные названия («М60», '
                 '«Юноши до 17 лет»). Результаты в чужих группах будут отброшены.'
+            ),
+        }),
+        ('Выступает за другой клуб или регион', {
+            'fields': ('club_only',),
+            'description': (
+                'Включите «Только за клуб», если на части стартов участник бежит не за '
+                'клуб, а за свой регион или другой клуб (например, на первенстве России). '
+                'Тогда при обработке он ищется только по названию команды, а не по базе.'
             ),
         }),
         ('Ветеран / Сезонный зачёт', {
@@ -123,6 +139,16 @@ class KnownParticipantAdmin(admin.ModelAdmin):
     def unmark_excluded(self, request, queryset):
         updated = queryset.update(excluded=False)
         self.message_user(request, f'Возвращено в зачёт: {updated}.')
+
+    @admin.action(description='Только за клуб (не искать по базе)')
+    def mark_as_club_only(self, request, queryset):
+        updated = queryset.update(club_only=True)
+        self.message_user(request, f'Ищутся только по клубу: {updated}.')
+
+    @admin.action(description='Искать и по базе (снять «только за клуб»)')
+    def unmark_club_only(self, request, queryset):
+        updated = queryset.update(club_only=False)
+        self.message_user(request, f'Снова ищутся по базе: {updated}.')
 
 
 @admin.register(SeasonRanking)

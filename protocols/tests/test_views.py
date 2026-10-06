@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Тесты вью-функций protocols/views.py."""
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import unquote
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 
@@ -379,6 +380,68 @@ class ExcludedParticipantProcessingTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.context['excluded_count'], 1)
         self.assertContains(resp, 'не учитывается')
+
+
+class ClubOnlyParticipantProcessingTests(TestCase):
+    """
+    «Только за клуб»: участник находится по названию команды, но не по базе —
+    на первенстве России он бежит за свой регион, и результат не наш.
+    """
+
+    def setUp(self):
+        payload = SPORTORG_DATA_PREFIX + extract_race_b64(_race_html(_personal_race()))
+        self.protocol = make_protocol(
+            source_url='https://o-club.ru/results.html?sportorg=1',
+            source_kind=KIND_SPORTORG,
+            raw_html=payload,
+        )
+        make_known_participant(last_name='Антонова', first_name='Дарья')
+        self.club_only = make_known_participant(last_name='Нестерова', first_name='Ксения')
+        self.club_only.club_only = True
+        self.club_only.save(update_fields=['club_only'])
+
+    def _process(self, team_name):
+        self.client.post(
+            reverse('protocols:protocol_detail', args=[self.protocol.pk]),
+            data={'team_name': team_name, 'protocol_id': self.protocol.pk},
+        )
+        return set(self.protocol.results.values_list('last_name', flat=True))
+
+    def test_found_when_running_for_the_club(self):
+        self.assertEqual(self._process('Фотон'), {'Антонова', 'Нестерова'})
+
+    def test_not_searched_by_base(self):
+        self.assertEqual(self._process(''), {'Антонова'})
+
+    def test_flag_survives_processing(self):
+        self._process('Фотон')
+        self.club_only.refresh_from_db()
+        self.assertTrue(self.club_only.club_only)
+
+    @patch('protocols.services.pdf_parser.parse_pdf_protocol')
+    def test_scanned_pdf_does_not_mark_as_team_member(self, mock_parse):
+        parsed = MagicMock(
+            title='Первенство России', event_date='', page_errors=[], raw_ocr_text='',
+            finish_results=[],
+            prologue_results=[
+                {'group_name': 'Ж12', 'place': str(place), 'place_out_of': 2,
+                 'last_name': last_name, 'first_name': 'Дарья' if place == 1 else 'Ксения',
+                 'points': 1000, 'raw_line': ''}
+                for place, last_name in ((1, 'Антонова'), (2, 'Нестерова'))
+            ],
+        )
+        mock_parse.return_value = parsed
+        pdf = SimpleUploadedFile('scan.pdf', b'%PDF-1.4', content_type='application/pdf')
+        self.client.post(reverse('protocols:load_pdf_protocol'), data={'pdf_file': pdf})
+        team = dict(
+            ProtocolResult.objects.filter(protocol__source_url='pdf_upload:scan.pdf')
+            .values_list('last_name', 'team_member')
+        )
+        self.assertEqual(team, {'Антонова': True, 'Нестерова': False})
+
+    def test_known_participants_page_shows_flag(self):
+        resp = self.client.get(reverse('protocols:known_participants'))
+        self.assertContains(resp, 'только за клуб')
 
 
 class SetProtocolTitleViewTests(TestCase):

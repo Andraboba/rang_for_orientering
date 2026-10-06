@@ -124,7 +124,7 @@ def _calc_points(t_actual_sec: int, t_leader_sec: int) -> int:
     return min(1000, max(1, points))
 
 
-def _count_participants(rows_html: List[str]) -> int:
+def _count_participants(rows_html: List[str], name_idx: int = 2) -> int:
     """
     Считает количество участников в группе (все строки таблицы, кроме заголовка).
     Исключает пустые строки (без имени).
@@ -132,42 +132,90 @@ def _count_participants(rows_html: List[str]) -> int:
     count = 0
     for row in rows_html:
         cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
-        if len(cells) >= 3:
-            name = _strip_tags(cells[2]).strip()
+        if len(cells) > name_idx:
+            name = _strip_tags(cells[name_idx]).strip()
             if name:
                 count += 1
     return count
 
 
-def _get_place(cells: List[str]) -> str:
+# Колонки по умолчанию: П/п | № | Фамилия, имя | Команда | Результат | Отставание | Место.
+_DEFAULT_COLUMNS = {'name': 2, 'team': 3, 'result': 4, 'place': 6}
+
+# Подстрока заголовка → логическая колонка. В части протоколов между
+# «Командой» и результатом стоит «Онлайн-КП», а результат называется «FINISH»,
+# поэтому номера колонок берутся из заголовка таблицы.
+_HEADER_KEYWORDS = (
+    ('фамилия', 'name'),
+    ('команда', 'team'),
+    ('коллектив', 'team'),
+    ('результат', 'result'),
+    ('finish', 'result'),
+    ('финиш', 'result'),
+    ('место', 'place'),
+)
+
+
+def _detect_columns(header_row: str) -> Dict[str, Optional[int]]:
+    """
+    Номера колонок по строке заголовка таблицы. Если заголовок не распознан
+    (нет колонок с именем и результатом), остаются номера по умолчанию.
+    """
+    cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', header_row, re.IGNORECASE | re.DOTALL)
+    found: Dict[str, int] = {}
+    for idx, cell in enumerate(cells):
+        text = _strip_tags(cell).lower()
+        for keyword, column in _HEADER_KEYWORDS:
+            if column not in found and keyword in text:
+                found[column] = idx
+                break
+
+    columns: Dict[str, Optional[int]] = dict(_DEFAULT_COLUMNS)
+    if 'name' in found and 'result' in found:
+        columns.update(found)
+        if 'place' not in found:
+            # Нет колонки «Место» — место берётся из П/п.
+            columns['place'] = None
+    return columns
+
+
+def _cell_text(cells: List[str], idx: Optional[int]) -> str:
+    if idx is None or idx >= len(cells):
+        return ''
+    return cells[idx].strip()
+
+
+def _get_place(cells: List[str], place_idx: Optional[int] = 6) -> str:
     """
     Определяет место участника из строки таблицы.
     Orgeo имеет два формата:
-      А) с колонкой «Место» в cells[6] (явное место, число)
+      А) с колонкой «Место» (явное место, число)
       Б) без колонки «Место» — место = cells[0] (П/п в отсортированном списке)
-    Формат определяется по тому, является ли cells[6] числом.
+    Формат определяется по тому, является ли значение в колонке «Место» числом.
     """
-    if len(cells) > 6:
-        explicit = cells[6].strip()
-        if explicit.isdigit():
-            return explicit
+    explicit = _cell_text(cells, place_idx)
+    if explicit.isdigit():
+        return explicit
     return cells[0].strip() if cells else ''
 
 
-def _find_leader_time(rows_html: List[str]) -> Optional[int]:
+def _find_leader_time(
+    rows_html: List[str],
+    columns: Optional[Dict[str, Optional[int]]] = None,
+) -> Optional[int]:
     """
     Находит время лидера (1 место) в группе.
     Лидер — первая строка с местом "1" и нормальным временем в колонке «Результат».
     """
+    columns = columns or _DEFAULT_COLUMNS
     for row in rows_html:
         cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
         if len(cells) < 5:
             continue
         cells_text = [_strip_tags(c) for c in cells]
-        place = _get_place(cells_text)
+        place = _get_place(cells_text, columns['place'])
         if place == '1':
-            result_str = cells_text[4].strip()
-            return _seconds_from_time(result_str)
+            return _seconds_from_time(_cell_text(cells_text, columns['result']))
     return None
 
 
@@ -219,15 +267,23 @@ def _split_relay_blocks(data_rows: List[str]) -> List[List[str]]:
     return blocks
 
 
-def _parse_relay_team_block(block_rows: List[str]) -> dict:
+def _parse_relay_team_block(
+    block_rows: List[str],
+    columns: Optional[Dict[str, Optional[int]]] = None,
+) -> dict:
     """
     Парсит блок строк одной команды эстафеты.
-    Возвращает: {place, relay_team_name, members, total_time_sec}.
+    Возвращает: {place, relay_team_name, members, total_time_sec, status}.
     members — список (last_name, first_name, member_club).
     total_time_sec — время последнего этапа (накопленное итоговое время команды).
+    status — статус снятия («непр.отмет.» и т.п.), если он есть хотя бы
+    у одного этапа: такая команда снята, даже если последний этап финишировал.
     """
+    columns = columns or _DEFAULT_COLUMNS
+    name_idx, team_idx, result_idx = columns['name'], columns['team'], columns['result']
     place = ''
     relay_team_name = ''
+    status = ''
     members: List[Tuple[str, str, str]] = []  # (ln, fn, club)
 
     for row in block_rows:
@@ -240,34 +296,37 @@ def _parse_relay_team_block(block_rows: List[str]) -> dict:
         if not place and cells[0].isdigit():
             place = cells[0]
 
-        # ФИ бегуна — cells[2], клуб бегуна — cells[3]
-        full_name = cells[2] if len(cells) > 2 else ''
-        member_club = cells[3] if len(cells) > 3 else ''
+        result_str = _cell_text(cells, result_idx)
+        if not status and _is_disqualified(result_str):
+            status = result_str
+
+        full_name = _cell_text(cells, name_idx)
+        member_club = _cell_text(cells, team_idx)
         if full_name and full_name.lower().strip() not in _RELAY_NO_RUNNER:
             ln, fn = _split_name(full_name)
             if ln.strip():
                 members.append((ln.strip(), fn.strip(), member_club.strip()))
 
-        # Название эстафетной команды — cells[3] первой строки
-        if not relay_team_name and len(cells) > 3 and cells[3]:
-            relay_team_name = cells[3]
+        # Название эстафетной команды — клуб первой строки
+        if not relay_team_name and member_club:
+            relay_team_name = member_club
 
-    # Итоговое время = время в cells[4] последней строки блока
+    # Итоговое время = результат последней строки блока
     total_time_sec: Optional[int] = None
     last_cells_html = re.findall(
         r'<td[^>]*>(.*?)</td>', block_rows[-1], re.IGNORECASE | re.DOTALL
     )
-    if len(last_cells_html) >= 5:
-        last_cells = [_strip_tags(c).strip() for c in last_cells_html]
-        t_str = last_cells[4]
-        if t_str and not _is_disqualified(t_str):
-            total_time_sec = _seconds_from_time(t_str)
+    last_cells = [_strip_tags(c).strip() for c in last_cells_html]
+    t_str = _cell_text(last_cells, result_idx)
+    if t_str and not status:
+        total_time_sec = _seconds_from_time(t_str)
 
     return {
         'place': place,
         'relay_team_name': relay_team_name,
         'members': members,
         'total_time_sec': total_time_sec,
+        'status': status,
     }
 
 
@@ -304,7 +363,8 @@ def parse_orgeo_relay(
     if not blocks:
         return results
 
-    teams = [_parse_relay_team_block(b) for b in blocks]
+    columns = _detect_columns(rows[0])
+    teams = [_parse_relay_team_block(b, columns) for b in blocks]
 
     # Время лидера — команда с place='1' и валидным итоговым временем
     leader_time_sec: Optional[int] = None
@@ -343,17 +403,18 @@ def parse_orgeo_relay(
         if not filtered:
             continue
 
-        # Очки команды
+        # Очки команды. Снятая команда (статус хотя бы у одного этапа) стоит
+        # в общем списке с номером П/п, но очков и места не получает.
         place = team['place']
         total_time = team['total_time_sec']
-        if not place or not total_time or not leader_time_sec:
+        if team['status'] or not place or not total_time or not leader_time_sec:
             points = 0
         elif place == '1':
             points = 1000
         else:
             points = _calc_points(total_time, leader_time_sec)
 
-        place_display = place if place else '-'
+        place_display = team['status'] or place or '-'
 
         for last_name, first_name in filtered:
             raw_line = (
@@ -411,11 +472,14 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
     if _is_relay_group(data_rows):
         return parse_orgeo_relay(html, base_pairs, team_name)
 
+    # Номера колонок — по заголовку таблицы (бывает лишняя колонка «Онлайн-КП»).
+    columns = _detect_columns(rows[0])
+
     # ── Считаем кол-во участников в группе ──
-    group_size = _count_participants(data_rows)
+    group_size = _count_participants(data_rows, columns['name'])
 
     # ── Находим время лидера для расчёта очков ──
-    t_leader = _find_leader_time(data_rows)
+    t_leader = _find_leader_time(data_rows, columns)
 
     for row in data_rows:
         cells_html = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
@@ -423,9 +487,9 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
             continue
 
         cells = [_strip_tags(c) for c in cells_html]
-        # Колонки: [0]=П/п, [1]=№, [2]=ФИ, [3]=Команда, [4]=Результат, [5]=Отставание, [6]=Место, [7]=Старт, ...
-        full_name = cells[2].strip()
-        team_cell = cells[3].strip() if len(cells) > 3 else ''
+        # Обычно: [0]=П/п, [1]=№, [2]=ФИ, [3]=Команда, [4]=Результат, [5]=Отставание, [6]=Место, [7]=Старт, ...
+        full_name = _cell_text(cells, columns['name'])
+        team_cell = _cell_text(cells, columns['team'])
 
         if not full_name:
             continue
@@ -447,9 +511,9 @@ def parse_orgeo(html: str, base_pairs: List[Tuple[str, str]], team_name: str = '
             if key_normalized not in known:
                 continue
 
-        result_str = cells[4].strip() if len(cells) > 4 else ''
-        # Место: Format A — явная колонка cells[6], Format B — П/п cells[0]
-        place_col = _get_place(cells)
+        result_str = _cell_text(cells, columns['result'])
+        # Место: Format A — явная колонка «Место», Format B — П/п cells[0]
+        place_col = _get_place(cells, columns['place'])
 
         # ── Определяем статус ──
         disqualified = _is_disqualified(result_str)
