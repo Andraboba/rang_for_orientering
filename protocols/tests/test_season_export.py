@@ -239,3 +239,57 @@ class ExportExcelTests(TestCase):
         content = export_season_excel(r)
         wb = load_workbook(BytesIO(content))
         self.assertEqual(wb['Места'].max_row, 1)  # только заголовок
+
+    def test_saved_ranking_points_are_written_as_values(self):
+        r = self._make_filled()
+        ws = load_workbook(BytesIO(export_season_excel(r)))['Баллы']
+        self.assertEqual([c.value for c in ws[2]], ['Иванов Иван', 1000.0])
+
+
+class PointsFormulaSheetTests(TestCase):
+    """Лист «Баллы»: число зачётных стартов меняется в ячейке B1 прямо в Excel."""
+
+    def setUp(self):
+        lvl = make_championship_level(coefficient=1.5)
+        first = make_protocol(event_date=date(2026, 9, 4), title='Первый старт', championship_level=lvl)
+        second = make_protocol(event_date=date(2026, 9, 6), title='Второй старт')
+        make_result(first, last_name='Иванов', first_name='Иван', points=1000)
+        make_result(second, last_name='Иванов', first_name='Иван', points=800)
+        make_result(second, last_name='Петров', first_name='Пётр', points=900)
+
+    def _sheet(self, max_starts=None):
+        content = export_season_excel_by_date_range(
+            date(2026, 9, 1), date(2026, 9, 30), max_starts=max_starts
+        )
+        return load_workbook(BytesIO(content))['Баллы']
+
+    def test_starts_cell_defaults_to_all_starts(self):
+        self.assertEqual(self._sheet()['B1'].value, 2)
+
+    def test_starts_cell_takes_value_from_form(self):
+        self.assertEqual(self._sheet(max_starts=1)['B1'].value, 1)
+
+    def test_points_per_start_with_coefficient(self):
+        ws = self._sheet()
+        self.assertEqual(ws['E3'].value, '04.09 Первый старт')
+        self.assertEqual(ws['F3'].value, '06.09 Второй старт')
+        # Строки отсортированы по итогу: Иванов 1500 + 800, Петров 900.
+        self.assertEqual([ws['B4'].value, ws['E4'].value, ws['F4'].value], ['Иванов Иван', 1500, 800])
+        self.assertEqual([ws['B5'].value, ws['E5'].value, ws['F5'].value], ['Петров Пётр', None, 900])
+
+    def test_total_and_place_are_formulas(self):
+        ws = self._sheet()
+        self.assertEqual(
+            ws['C4'].value,
+            '=IF(MIN($B$1,COUNT(E4:F4))<1,0,'
+            'SUMPRODUCT(LARGE(E4:F4,ROW(INDIRECT("1:"&MIN($B$1,COUNT(E4:F4)))))))',
+        )
+        self.assertEqual(ws['A4'].value, '=RANK(C4,$C$4:$C$5)')
+        self.assertEqual(ws['D4'].value, '=COUNT(E4:F4)')
+
+    def test_veterans_sheet_has_formulas_too(self):
+        make_known_participant(last_name='Петров', first_name='Пётр', veteran=True)
+        content = export_season_excel_by_date_range(date(2026, 9, 1), date(2026, 9, 30))
+        ws = load_workbook(BytesIO(content))['Ветераны — Баллы']
+        self.assertEqual(ws['B4'].value, 'Петров Пётр')
+        self.assertTrue(ws['C4'].value.startswith('=IF(MIN($B$1'))

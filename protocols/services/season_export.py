@@ -5,13 +5,16 @@
 2) Баллы              — итоговые очки обычных участников.
 3) Ветераны — Места   — то же для ветеранов.
 4) Ветераны — Баллы   — итоговые очки ветеранов.
+
+Листы «Баллы» строятся формулами: очки по каждому старту, итог — сумма лучших
+N стартов, где N задаётся ячейкой B1 прямо в Excel (без повторной выгрузки).
 """
 import re
 from collections import defaultdict
 from io import BytesIO
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from ..models import (
@@ -218,17 +221,15 @@ def build_points_data(ranking, veterans_only=False):
     ]
 
 
-def build_points_data_from_protocols(protocols, max_starts=None, veterans_only=False):
+def build_points_matrix(protocols, veterans_only=False):
     """
-    Сумма очков по результатам протоколов за период: по каждому участнику
-    суммируем (ProtocolResult.points × коэффициент старта).
-    veterans_only=False → только не-ветераны.
-    veterans_only=True  → только ветераны.
-    Если max_starts задан — берём только лучшие N стартов каждого участника.
-    Возвращает: list of (last_name, first_name, total_points)
+    Взвешенные очки (ProtocolResult.points × коэффициент) по каждому старту:
+    {(фамилия, имя): {protocol_id: очки}}. Несколько результатов в одном
+    протоколе (дни многодневки, эстафета) складываются в один старт.
+    veterans_only=False → только не-ветераны, True → только ветераны.
     """
     if not protocols:
-        return []
+        return {}
 
     veteran_set = _veteran_name_pairs()
     excluded_set = excluded_name_pairs()
@@ -255,14 +256,30 @@ def build_points_data_from_protocols(protocols, max_starts=None, veterans_only=F
         need_split = split_by_group.get((ln, fn), False)
         person_key = _display_person_name(ln, fn, r.group_name, need_split)
         per_start[person_key][r.protocol_id] += float(r.weighted_points)
+    return {person: dict(starts) for person, starts in per_start.items()}
 
+
+def _best_starts_totals(per_start, max_starts=None):
+    """Сумма лучших max_starts стартов каждого участника (None — всех)."""
     totals = {}
     for person_key, starts in per_start.items():
         points_list = sorted(starts.values(), reverse=True)
         if max_starts is not None:
             points_list = points_list[:max_starts]
         totals[person_key] = sum(points_list)
+    return totals
 
+
+def build_points_data_from_protocols(protocols, max_starts=None, veterans_only=False):
+    """
+    Сумма очков по результатам протоколов за период: по каждому участнику
+    суммируем (ProtocolResult.points × коэффициент старта).
+    veterans_only=False → только не-ветераны.
+    veterans_only=True  → только ветераны.
+    Если max_starts задан — берём только лучшие N стартов каждого участника.
+    Возвращает: list of (last_name, first_name, total_points)
+    """
+    totals = _best_starts_totals(build_points_matrix(protocols, veterans_only), max_starts)
     return [
         (last_name, first_name, total)
         for (last_name, first_name), total in sorted(
@@ -326,6 +343,103 @@ def _write_points_sheet(ws, points_list, label='Баллы'):
     ws.column_dimensions['B'].width = 22
 
 
+# Лист «Баллы» с формулами: число зачётных стартов меняется прямо в Excel.
+STARTS_INPUT_CELL = 'B1'
+_POINTS_HEADER_ROW = 3
+_POINTS_FIRST_COLUMN = 5  # A — место, B — участник, C — итог, D — стартов, дальше старты
+
+
+def _best_n_formula(first_cell, last_cell, starts_cell):
+    """
+    Сумма лучших N значений строки, N — в ячейке starts_cell (не больше числа стартов).
+    ROW(INDIRECT("1:k")) даёт {1..k}, LARGE берёт k лучших, SUMPRODUCT их складывает —
+    работает и в старом Excel без формул массива, и в LibreOffice.
+    """
+    values = f'{first_cell}:{last_cell}'
+    k = f'MIN({starts_cell},COUNT({values}))'
+    return f'=IF({k}<1,0,SUMPRODUCT(LARGE({values},ROW(INDIRECT("1:"&{k})))))'
+
+
+def _write_points_formula_sheet(ws, protocols, veterans_only=False, max_starts=None):
+    """
+    Лист «Баллы»: очки участника по каждому старту (с коэффициентом уровня),
+    итог — формула «сумма лучших N стартов», N — в ячейке B1. Места считаются
+    формулой RANK, поэтому при смене N итог и места пересчитываются сами;
+    строки отсортированы по итогу для N, заданного при выгрузке.
+    """
+    total_starts = len(protocols)
+    default_n = min(max_starts, total_starts) if max_starts else total_starts
+    per_start = build_points_matrix(protocols, veterans_only=veterans_only)
+    totals = _best_starts_totals(per_start, default_n)
+    people = sorted(totals, key=lambda key: (-totals[key], key[0].lower(), key[1].lower()))
+
+    starts_cell = f'${STARTS_INPUT_CELL[0]}${STARTS_INPUT_CELL[1:]}'
+    ws['A1'] = 'Зачётных стартов:'
+    ws['A1'].font = Font(bold=True)
+    ws[STARTS_INPUT_CELL] = default_n
+    ws[STARTS_INPUT_CELL].font = Font(bold=True, color='0000FF')
+    ws[STARTS_INPUT_CELL].fill = PatternFill('solid', start_color='FFFF00')
+    ws[STARTS_INPUT_CELL].alignment = Alignment(horizontal='center')
+    ws['C1'] = (
+        f'из {total_starts}. Впишите другое число — итог и места пересчитаются. '
+        'В столбцах стартов — очки с коэффициентом уровня.'
+    )
+    ws['C1'].font = Font(italic=True, color='808080')
+
+    first_col = _POINTS_FIRST_COLUMN
+    last_col = first_col + max(total_starts, 1) - 1
+    header = ['Место', 'Участник', f'="Баллы (лучшие "&{starts_cell}&")"', 'Стартов']
+    for p in protocols:
+        event_date = (p.event.date if p.event else None) or p.event_date
+        prefix = f'{event_date:%d.%m} ' if event_date else ''
+        header.append(f'{prefix}{_protocol_display_title(p)}')
+    # Строка 2 — отступ между настройкой и таблицей.
+    for col, title in enumerate(header, start=1):
+        cell = ws.cell(row=_POINTS_HEADER_ROW, column=col, value=title)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    first_row = _POINTS_HEADER_ROW + 1
+    last_row = _POINTS_HEADER_ROW + len(people)
+    first_letter, last_letter = get_column_letter(first_col), get_column_letter(last_col)
+    for row, person in enumerate(people, start=first_row):
+        values_first, values_last = f'{first_letter}{row}', f'{last_letter}{row}'
+        ws.cell(row=row, column=1, value=f'=RANK(C{row},$C${first_row}:$C${last_row})')
+        ws.cell(row=row, column=2, value=f'{person[0]} {person[1]}')
+        ws.cell(row=row, column=3, value=_best_n_formula(values_first, values_last, starts_cell))
+        ws.cell(row=row, column=4, value=f'=COUNT({values_first}:{values_last})')
+        for offset, p in enumerate(protocols):
+            points = per_start[person].get(p.id)
+            if points is not None:
+                ws.cell(row=row, column=first_col + offset, value=round(points, 2))
+        for col in [3] + list(range(first_col, last_col + 1)):
+            ws.cell(row=row, column=col).number_format = '0.00'
+
+    ws.freeze_panes = ws.cell(row=first_row, column=3)
+    if people:
+        # Фильтр в заголовке — чтобы пересортировать таблицу после смены N.
+        ws.auto_filter.ref = f'A{_POINTS_HEADER_ROW}:{last_letter}{last_row}'
+    ws.row_dimensions[_POINTS_HEADER_ROW].height = 60
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 25
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 9
+    for col in range(first_col, last_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
+
+
+def _write_ranking_or_formula_points(ws, ranking, protocols, veterans_only=False):
+    """
+    Если у рейтинга есть сохранённые итоги (SeasonRankingEntry) — пишем их как есть,
+    иначе — лист с формулами по протоколам периода.
+    """
+    saved = build_points_data(ranking, veterans_only=veterans_only) if ranking else []
+    if saved:
+        _write_points_sheet(ws, saved)
+    else:
+        _write_points_formula_sheet(ws, protocols, veterans_only=veterans_only)
+
+
 def export_season_excel(ranking):
     """
     Excel с четырьмя листами: «Места», «Баллы», «Ветераны — Места», «Ветераны — Баллы».
@@ -341,20 +455,14 @@ def export_season_excel(ranking):
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
     ws_points = wb.create_sheet('Баллы', 1)
-    _write_points_sheet(
-        ws_points,
-        build_points_data(ranking) or build_points_data_from_protocols(protocols),
-    )
+    _write_ranking_or_formula_points(ws_points, ranking, protocols)
 
     ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
     vet_people, vet_place_map, _ = build_places_data(protocols, veterans_only=True)
     _write_places_sheet_three_columns(ws_vet_places, start_columns, vet_people, vet_place_map)
 
     ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
-    _write_points_sheet(
-        ws_vet_points,
-        build_points_data(ranking, veterans_only=True) or build_points_data_from_protocols(protocols, veterans_only=True),
-    )
+    _write_ranking_or_formula_points(ws_vet_points, ranking, protocols, veterans_only=True)
 
     buf = BytesIO()
     wb.save(buf)
@@ -378,21 +486,14 @@ def export_season_excel_by_period(year, season):
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
     ws_points = wb.create_sheet('Баллы', 1)
-    _write_points_sheet(
-        ws_points,
-        (build_points_data(ranking) if ranking else []) or build_points_data_from_protocols(protocols),
-    )
+    _write_ranking_or_formula_points(ws_points, ranking, protocols)
 
     ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
     vet_people, vet_place_map, _ = build_places_data(protocols, veterans_only=True)
     _write_places_sheet_three_columns(ws_vet_places, start_columns, vet_people, vet_place_map)
 
     ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
-    _write_points_sheet(
-        ws_vet_points,
-        (build_points_data(ranking, veterans_only=True) if ranking else [])
-        or build_points_data_from_protocols(protocols, veterans_only=True),
-    )
+    _write_ranking_or_formula_points(ws_vet_points, ranking, protocols, veterans_only=True)
 
     buf = BytesIO()
     wb.save(buf)
@@ -407,11 +508,6 @@ def export_season_excel_by_date_range(date_from, date_to, max_starts=None):
     Если max_starts задан — в зачёт идут только лучшие N стартов каждого участника.
     """
     protocols = list(get_protocols_for_date_range(date_from, date_to))
-    points_label = (
-        f'Баллы (лучшие {max_starts} из {len(protocols)} стартов)'
-        if max_starts and max_starts < len(protocols)
-        else 'Баллы'
-    )
 
     wb = Workbook()
 
@@ -421,13 +517,9 @@ def export_season_excel_by_date_range(date_from, date_to, max_starts=None):
     people_sorted, place_map, start_columns = build_places_data(protocols)
     _write_places_sheet_three_columns(ws_places, start_columns, people_sorted, place_map)
 
-    # ── Лист 2: Баллы ──
+    # ── Лист 2: Баллы (число зачётных стартов меняется в ячейке B1) ──
     ws_points = wb.create_sheet('Баллы', 1)
-    _write_points_sheet(
-        ws_points,
-        build_points_data_from_protocols(protocols, max_starts=max_starts),
-        label=points_label,
-    )
+    _write_points_formula_sheet(ws_points, protocols, max_starts=max_starts)
 
     # ── Лист 3: Ветераны — Места ──
     ws_vet_places = wb.create_sheet('Ветераны — Места', 2)
@@ -436,10 +528,8 @@ def export_season_excel_by_date_range(date_from, date_to, max_starts=None):
 
     # ── Лист 4: Ветераны — Баллы ──
     ws_vet_points = wb.create_sheet('Ветераны — Баллы', 3)
-    _write_points_sheet(
-        ws_vet_points,
-        build_points_data_from_protocols(protocols, max_starts=max_starts, veterans_only=True),
-        label=points_label,
+    _write_points_formula_sheet(
+        ws_vet_points, protocols, veterans_only=True, max_starts=max_starts
     )
 
     buf = BytesIO()

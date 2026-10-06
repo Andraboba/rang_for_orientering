@@ -78,7 +78,7 @@ POSTGRES_PORT=5432
 | `sportident_parser.py` | Загрузка и парсинг SportIdent Online. `fetch_sportident_tables()` → список HTML-чанков, `parse_sportident()` — парсинг одного чанка. |
 | `sportorg_parser.py` | HTML-экспорт SportOrg (o-club.ru). Таблиц в HTML нет — данные лежат в `raceCompressed` = base64(gzip(JSON)). Парсится JSON, не HTML. Эстафета определяется по `race.data.race_type`. |
 | `pdf_summary_parser.py` | PDF по текстовому слою, без OCR: сумма многодневки (o-site.spb.ru, o-club.ru), протокол одного старта (колонка «Результат», группа — «Ж14, 23 КП» или «1этап (…)») и эстафета SportOrg (колонка «Ком.рез-т»). Колонки режутся по позициям из строки заголовка таблицы. Несколько PDF одного старта хранятся в одном протоколе через `PDF_PART_DELIMITER` и разбираются по отдельности. |
-| `season_export.py` | Экспорт сезонного зачёта в Excel (openpyxl). Два листа: «Места» (по 3 колонки на старт) и «Баллы». Дата протокола берётся из `event.date` или `protocol.event_date`. |
+| `season_export.py` | Экспорт сезонного зачёта в Excel (openpyxl). Листы «Места» (по 3 колонки на старт) и «Баллы» (+ ветеранские). «Баллы» — формулами: очки по каждому старту с коэффициентом, итог — сумма лучших N (`SUMPRODUCT(LARGE(…,ROW(INDIRECT("1:"&k))))`), N в ячейке B1 меняется прямо в Excel, место — `RANK`. Сохранённые `SeasonRankingEntry` пишутся значениями. Дата протокола берётся из `event.date` или `protocol.event_date`. |
 | `title_cleaner.py` | Удаляет служебные фразы («ПРОТОКОЛ РЕЗУЛЬТАТОВ», «Федерация...») из названий. |
 | `date_from_title.py` | Извлекает дату из строкового названия протокола. |
 
